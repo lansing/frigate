@@ -2,6 +2,7 @@ import logging
 
 import cv2
 import numpy as np
+from line_profiler import profile
 from scipy.ndimage import gaussian_filter
 
 from frigate.camera import PTZMetrics
@@ -53,9 +54,23 @@ class ImprovedMotionDetector(MotionDetector):
         self.ptz_metrics = ptz_metrics
         self.last_stop_time = None
 
+        self.inv_mask = np.full(
+            (self.motion_frame_size[0], self.motion_frame_size[1]), 255, dtype=np.uint8
+        )
+
+        # 2. Use your existing indices to "black out" the masked areas (0 = black)
+        # Since your debug shows two arrays of 39900, it looks like boolean indexing
+        # was converted to coordinates.
+        # If self.mask is the result of np.where(bool_mask), you can do:
+        self.inv_mask[self.mask] = 0
+
+        self.contrast_sum = 0
+        self.lut = np.zeros((256,), dtype=np.uint8)
+
     def is_calibrating(self):
         return self.calibrating
 
+    @profile
     def detect(self, frame):
         motion_boxes = []
 
@@ -98,25 +113,58 @@ class ImprovedMotionDetector(MotionDetector):
         # Improve contrast
         if self.config.improve_contrast:
             # TODO tracking moving average of min/max to avoid sudden contrast changes
-            min_value = np.percentile(resized_frame, 4).astype(np.uint8)
-            max_value = np.percentile(resized_frame, 96).astype(np.uint8)
+            # TODO SLOW!!
+            # TODO 30% of time
+            # min_value_old = np.percentile(resized_frame, 4).astype(np.uint8)
+            # TODO 16% of time
+            # max_value_old = np.percentile(resized_frame, 96).astype(np.uint8)
             # skip contrast calcs if the image is a single color
+            min_value, max_value = self.percentile_via_histogram(resized_frame)
+            # print(f"{min_value_old}->{min_value} {max_value_old}->{max_value}")
             if min_value < max_value:
                 # keep track of the last 50 contrast values
-                self.contrast_values[self.contrast_values_index] = [
-                    min_value,
-                    max_value,
-                ]
-                self.contrast_values_index += 1
-                if self.contrast_values_index == len(self.contrast_values):
-                    self.contrast_values_index = 0
+                # self.contrast_values[self.contrast_values_index] = [
+                #     min_value,
+                #     max_value,
+                # ]
+                # self.contrast_values_index += 1
+                # if self.contrast_values_index == len(self.contrast_values):
+                #     self.contrast_values_index = 0
 
-                avg_min, avg_max = np.mean(self.contrast_values, axis=0)
+                # avg_min, avg_max = np.mean(self.contrast_values, axis=0)
+                #
+                # 1. Subtract the old value before overwriting it
+                old_val = self.contrast_values[self.contrast_values_index]
+                self.contrast_sum -= old_val
 
-                resized_frame = np.clip(resized_frame, avg_min, avg_max)
-                resized_frame = (
-                    ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
-                ).astype(np.uint8)
+                # 2. Add the new value and store it
+                new_val = np.array([min_value, max_value])
+                self.contrast_values[self.contrast_values_index] = new_val
+                self.contrast_sum += new_val
+
+                # 3. Increment index (as you already do)
+                self.contrast_values_index = (self.contrast_values_index + 1) % len(
+                    self.contrast_values
+                )
+
+                # 4. Average is now a simple division, no iteration required
+                avg_min, avg_max = self.contrast_sum / 50.0
+
+                # resized_frame = np.clip(resized_frame, avg_min, avg_max)
+                # resized_frame = (
+                #     ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
+                # ).astype(np.uint8)
+
+                # 1. Update the LUT (only 256 iterations - extremely fast)
+                # This replaces both the np.clip and the (val - min) / (max - min) math
+                bins = np.arange(256)
+                lut_values = np.clip(
+                    (bins - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255
+                )
+                self.lut = lut_values.astype(np.uint8)
+
+                # 2. Apply the LUT to the whole image in one hardware-accelerated pass
+                resized_frame = cv2.LUT(resized_frame, self.lut)
 
         if self.save_images:
             contrasted_saved = resized_frame.copy()
@@ -124,9 +172,28 @@ class ImprovedMotionDetector(MotionDetector):
         # mask frame
         # this has to come after contrast improvement
         # Setting masked pixels to zero, to match the average frame at startup
-        resized_frame[self.mask] = [0]
+        # TODO SLOW!
+        # TODO 10%: 834     251555.7    301.6     15.9          resized_frame[self.mask] = [0]
+        # resized_frame[self.mask] = [0]
+        #
+        # 1. Create a blank "keep all" mask (255 = white)
+        # Use the motion frame dimensions: (150, 266)
 
-        resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+        # print(f"mask: {len(self.mask)}")
+        # for m in self.mask:
+        # print(m.shape)
+        # print(f"inv_mask:")
+        # print(self.inv_mask.shape)
+        # print(f"resized_frame:")
+        # print(resized_frame.shape)
+        resized_frame = cv2.bitwise_and(
+            resized_frame, resized_frame, mask=self.inv_mask
+        )
+
+        # TODO SLOW
+        # TODO 16%
+        # resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+        resized_frame = self.gaussian_via_cv2(resized_frame)
 
         if self.save_images:
             blurred_saved = resized_frame.copy()
@@ -243,6 +310,38 @@ class ImprovedMotionDetector(MotionDetector):
             self.motion_frame_count = 0
 
         return motion_boxes
+
+    @profile
+    def gaussian_via_cv2(self, resized_frame):
+
+        # Note: cv2.
+        # GaussianBlur takes a kernel size tuple (width, height) which must be odd numbers.
+        # If you used sigma=1, a standard kernel size is 5x5 or 7x7.
+        # You'll need to translate your `self.blur_radius` to an odd integer kernel size.
+        k_size = int(self.blur_radius * 2 + 1)  # Example conversion
+        if k_size % 2 == 0:
+            k_size += 1
+
+        resized_frame = cv2.GaussianBlur(resized_frame, (k_size, k_size), sigmaX=1)
+        return resized_frame
+
+    @profile
+    def percentile_via_histogram(self, resized_frame):
+        # 1. Calculate the histogram using OpenCV (very fast)
+        hist = cv2.calcHist([resized_frame], [0], None, [256], [0, 256]).flatten()
+
+        # 2. Get the cumulative sum of the histogram
+        cum_hist = np.cumsum(hist)
+
+        # 3. Calculate the threshold index based on pixel count
+        total_pixels = resized_frame.size
+        min_thresh = total_pixels * 0.04
+        max_thresh = total_pixels * 0.96
+
+        # 4. Find the first intensity bin that crosses the thresholds
+        min_value = np.searchsorted(cum_hist, min_thresh).astype(np.uint8)
+        max_value = np.searchsorted(cum_hist, max_thresh).astype(np.uint8)
+        return min_value, max_value
 
     def stop(self) -> None:
         """stop the motion detector."""
