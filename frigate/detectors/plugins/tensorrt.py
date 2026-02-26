@@ -1,14 +1,11 @@
 import ctypes
 import logging
-import platform
 
 import numpy as np
 
 try:
     import tensorrt as trt
     from cuda import cuda
-
-    TRT_VERSION = int(trt.__version__[0 : trt.__version__.find(".")])
 
     TRT_SUPPORT = True
 except ModuleNotFoundError:
@@ -18,7 +15,13 @@ from pydantic import Field
 from typing_extensions import Literal
 
 from frigate.detectors.detection_api import DetectionApi
-from frigate.detectors.detector_config import BaseDetectorConfig
+from frigate.detectors.detector_config import BaseDetectorConfig, ModelTypeEnum
+from frigate.util.model import (
+    post_process_dfine,
+    post_process_rfdetr,
+    post_process_yolo,
+    post_process_yolox,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,25 +53,23 @@ class TensorRTDetectorConfig(BaseDetectorConfig):
     device: int = Field(default=0, title="GPU Device Index")
 
 
-class HostDeviceMem(object):
-    """Simple helper data class that's a little nicer to use than a 2-tuple."""
-
-    def __init__(self, host_mem, device_mem, nbytes, size):
-        self.host = host_mem
-        err, self.host_dev = cuda.cuMemHostGetDevicePointer(self.host, 0)
-        self.device = device_mem
-        self.nbytes = nbytes
+class HostDeviceMem:
+    def __init__(self, size, dtype):
         self.size = size
-
-    def __str__(self):
-        return "Host:\n" + str(self.host) + "\nDevice:\n" + str(self.device)
-
-    def __repr__(self):
-        return self.__str__()
+        self.dtype = dtype
+        self.nbytes = size * np.dtype(dtype).itemsize
+        err, self.host_ptr = cuda.cuMemHostAlloc(
+            self.nbytes, cuda.CU_MEMHOSTALLOC_DEVICEMAP
+        )
+        err, self.device_ptr = cuda.cuMemAlloc(self.nbytes)
+        self.host = np.frombuffer(
+            (ctypes.c_byte * self.nbytes).from_address(int(self.host_ptr)),
+            dtype=self.dtype,
+        )
 
     def __del__(self):
-        cuda.cuMemFreeHost(self.host)
-        cuda.cuMemFree(self.device)
+        cuda.cuMemFreeHost(self.host_ptr)
+        cuda.cuMemFree(self.device_ptr)
 
 
 class TensorRtDetector(DetectionApi):
@@ -77,180 +78,109 @@ class TensorRtDetector(DetectionApi):
     def _load_engine(self, model_path):
         try:
             trt.init_libnvinfer_plugins(self.trt_logger, "")
-
             ctypes.cdll.LoadLibrary("/usr/local/lib/libyolo_layer.so")
         except OSError as e:
-            logger.error(
-                "ERROR: failed to load libraries. %s",
+            # TODO does this matter? it does postprocessing for classic yolos on gpu?
+            logger.warning(
+                "failed to load libraries. %s",
                 e,
             )
 
         with open(model_path, "rb") as f, trt.Runtime(self.trt_logger) as runtime:
             return runtime.deserialize_cuda_engine(f.read())
 
-    def _binding_is_input(self, binding):
-        if TRT_VERSION < 10:
-            return self.engine.binding_is_input(binding)
-        else:
-            return binding == "input"
-
-    def _get_binding_dims(self, binding):
-        if TRT_VERSION < 10:
-            return self.engine.get_binding_shape(binding)
-        else:
-            return self.engine.get_tensor_shape(binding)
-
-    def _get_binding_dtype(self, binding):
-        if TRT_VERSION < 10:
-            return self.engine.get_binding_dtype(binding)
-        else:
-            return self.engine.get_tensor_dtype(binding)
-
-    def _execute(self):
-        if TRT_VERSION < 10:
-            return self.context.execute_async_v2(
-                bindings=self.bindings, stream_handle=self.stream
-            )
-        else:
-            return self.context.execute_v2(self.bindings)
-
     def _get_input_shape(self):
-        """Get input shape of the TensorRT YOLO engine."""
-        binding = self.engine[0]
-        assert self._binding_is_input(binding)
-        binding_dims = self._get_binding_dims(binding)
+        """Get input shape of the TensorRT engine."""
+        name = self.engine.get_tensor_name(0)
+        binding_dims = self.engine.get_tensor_shape(name)
+        dtype = trt.nptype(self.engine.get_tensor_dtype(name))
         if len(binding_dims) == 4:
-            return (
-                tuple(binding_dims[2:]),
-                trt.nptype(self._get_binding_dtype(binding)),
-            )
+            return (tuple(binding_dims[2:]), dtype)
         elif len(binding_dims) == 3:
-            return (
-                tuple(binding_dims[1:]),
-                trt.nptype(self._get_binding_dtype(binding)),
-            )
+            return (tuple(binding_dims[1:]), dtype)
         else:
-            raise ValueError(
-                "bad dims of binding %s: %s" % (binding, str(binding_dims))
-            )
+            raise ValueError("bad dims of binding %s: %s" % (name, str(binding_dims)))
 
     def _allocate_buffers(self):
         """Allocates all host/device in/out buffers required for an engine."""
         inputs = []
         outputs = []
         bindings = []
-        output_idx = 0
-        for binding in self.engine:
-            binding_dims = self._get_binding_dims(binding)
-            if len(binding_dims) == 4:
-                # explicit batch case (TensorRT 7+)
-                size = trt.volume(binding_dims)
-            elif len(binding_dims) == 3:
-                # implicit batch case (TensorRT 6 or older)
-                size = trt.volume(binding_dims) * self.engine.max_batch_size
-            else:
-                raise ValueError(
-                    "bad dims of binding %s: %s" % (binding, str(binding_dims))
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            size = trt.volume(self.engine.get_tensor_shape(name))
+            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+            mem = HostDeviceMem(size, dtype)
+            bindings.append(int(mem.device_ptr))
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                logger.debug(
+                    "Input tensor %s shape: %s",
+                    name,
+                    self.engine.get_tensor_shape(name),
                 )
-            nbytes = size * self._get_binding_dtype(binding).itemsize
-            # Allocate host and device buffers
-            err, host_mem = cuda.cuMemHostAlloc(
-                nbytes, Flags=cuda.CU_MEMHOSTALLOC_DEVICEMAP
-            )
-            assert err is cuda.CUresult.CUDA_SUCCESS, f"cuMemAllocHost returned {err}"
-            logger.debug(
-                f"Allocated Tensor Binding {binding} Memory {nbytes} Bytes ({size} * {self._get_binding_dtype(binding)})"
-            )
-            err, device_mem = cuda.cuMemAlloc(nbytes)
-            assert err is cuda.CUresult.CUDA_SUCCESS, f"cuMemAlloc returned {err}"
-            # Append the device buffer to device bindings.
-            bindings.append(int(device_mem))
-            # Append to the appropriate list.
-            if self._binding_is_input(binding):
-                logger.debug(f"Input has Shape {binding_dims}")
-                inputs.append(HostDeviceMem(host_mem, device_mem, nbytes, size))
+                inputs.append(mem)
             else:
-                # each grid has 3 anchors, each anchor generates a detection
-                # output of 7 float32 values
-                assert size % 7 == 0, f"output size was {size}"
-                logger.debug(f"Output has Shape {binding_dims}")
-                outputs.append(HostDeviceMem(host_mem, device_mem, nbytes, size))
-                output_idx += 1
-        assert len(inputs) == 1, f"inputs len was {len(inputs)}"
-        assert len(outputs) == 1, f"output len was {len(outputs)}"
+                logger.debug(
+                    "Output tensor %s shape: %s",
+                    name,
+                    self.engine.get_tensor_shape(name),
+                )
+                outputs.append(mem)
         return inputs, outputs, bindings
 
     def _do_inference(self):
-        """do_inference (for TensorRT 7.0+)
-        This function is generalized for multiple inputs/outputs for full
-        dimension networks.
-        Inputs and outputs are expected to be lists of HostDeviceMem objects.
-        """
-        # Push CUDA Context
         cuda.cuCtxPushCurrent(self.cu_ctx)
 
-        # Transfer input data to the GPU.
-        [
-            cuda.cuMemcpyHtoDAsync(inp.device, inp.host, inp.nbytes, self.stream)
-            for inp in self.inputs
-        ]
+        for inp in self.inputs:
+            cuda.cuMemcpyHtoDAsync(
+                inp.device_ptr, inp.host_ptr, inp.nbytes, self.stream
+            )
 
-        # Run inference.
-        if not self._execute():
-            logger.warning("Execute returned false")
+        if not self.context.execute_v2(self.bindings):
+            logger.warning("execute_v2 returned false")
 
-        # Transfer predictions back from the GPU.
-        [
-            cuda.cuMemcpyDtoHAsync(out.host, out.device, out.nbytes, self.stream)
-            for out in self.outputs
-        ]
+        for out in self.outputs:
+            cuda.cuMemcpyDtoHAsync(
+                out.host_ptr, out.device_ptr, out.nbytes, self.stream
+            )
 
-        # Synchronize the stream
         cuda.cuStreamSynchronize(self.stream)
-
-        # Pop CUDA Context
         cuda.cuCtxPopCurrent()
 
-        # Return only the host outputs.
         return [
-            np.array(
-                (ctypes.c_float * out.size).from_address(out.host), dtype=np.float32
+            out.host.reshape(
+                self.engine.get_tensor_shape(
+                    self.engine.get_tensor_name(len(self.inputs) + i)
+                )
             )
-            for out in self.outputs
+            for i, out in enumerate(self.outputs)
         ]
 
     def __init__(self, detector_config: TensorRTDetectorConfig):
-        if platform.machine() == "x86_64":
-            logger.error(
-                "TensorRT detector is no longer supported on amd64 system. Please use ONNX detector instead, see https://docs.frigate.video/configuration/object_detectors#onnx for more information."
-            )
-            raise ImportError(
-                "TensorRT detector is no longer supported on amd64 system. Please use ONNX detector instead, see https://docs.frigate.video/configuration/object_detectors#onnx for more information."
-            )
+        assert (
+            TRT_SUPPORT
+        ), f"TensorRT libraries not found, {DETECTOR_KEY} detector not present"
 
-        assert TRT_SUPPORT, (
-            f"TensorRT libraries not found, {DETECTOR_KEY} detector not present"
-        )
+        super().__init__(detector_config)
 
         (cuda_err,) = cuda.cuInit(0)
-        assert cuda_err == cuda.CUresult.CUDA_SUCCESS, (
-            f"Failed to initialize cuda {cuda_err}"
-        )
+        assert (
+            cuda_err == cuda.CUresult.CUDA_SUCCESS
+        ), f"Failed to initialize cuda {cuda_err}"
         err, dev_count = cuda.cuDeviceGetCount()
         logger.debug(f"Num Available Devices: {dev_count}")
-        assert detector_config.device < dev_count, (
-            f"Invalid TensorRT Device Config. Device {detector_config.device} Invalid."
-        )
+        assert (
+            detector_config.device < dev_count
+        ), f"Invalid TensorRT Device Config. Device {detector_config.device} Invalid."
         err, self.cu_ctx = cuda.cuCtxCreate(
             cuda.CUctx_flags.CU_CTX_MAP_HOST, detector_config.device
         )
 
-        self.conf_th = 0.4  ##TODO: model config parameter
-        self.nms_threshold = 0.4
         err, self.stream = cuda.cuStreamCreate(0)
         self.trt_logger = TrtLogger()
         self.engine = self._load_engine(detector_config.model.path)
         self.input_shape = self._get_input_shape()
+        self.model_type = detector_config.model.model_type
 
         try:
             self.context = self.engine.create_execution_context()
@@ -263,34 +193,45 @@ class TensorRtDetector(DetectionApi):
             logger.error(e)
             raise RuntimeError("fail to allocate CUDA resources") from e
 
+        if self.model_type == ModelTypeEnum.yolox:
+            self.calculate_grids_strides()
+
+        logger.info(
+            "TensorRT detector initialized. Congratulations on running TensorRT on this system!"
+        )
         logger.debug("TensorRT loaded. Input shape is %s", self.input_shape)
-        logger.debug("TensorRT version is %s", TRT_VERSION)
 
     def __del__(self):
         """Free CUDA memories."""
-        if self.outputs is not None:
+        if hasattr(self, "outputs") and self.outputs is not None:
             del self.outputs
-        if self.inputs is not None:
+        if hasattr(self, "inputs") and self.inputs is not None:
             del self.inputs
-        if self.stream is not None:
+        if hasattr(self, "stream") and self.stream is not None:
             cuda.cuStreamDestroy(self.stream)
             del self.stream
-        del self.engine
-        del self.context
-        del self.trt_logger
-        cuda.cuCtxDestroy(self.cu_ctx)
+        if hasattr(self, "engine"):
+            del self.engine
+        if hasattr(self, "context"):
+            del self.context
+        if hasattr(self, "trt_logger"):
+            del self.trt_logger
+        if hasattr(self, "cu_ctx"):
+            cuda.cuCtxDestroy(self.cu_ctx)
 
     def _postprocess_yolo(self, trt_outputs, conf_th):
-        """Postprocess TensorRT outputs.
+        # TODO we should detect whether libyolo was loaded, and rely on libyolo in that case
+        # see mainline tensorrt.py for what they do
+        """Postprocess TensorRT outputs for legacy SSD/YOLO format.
+
         # Args
             trt_outputs: a list of 2 or 3 tensors, where each tensor
                         contains a multiple of 7 float32 numbers in
                         the order of [x, y, w, h, box_confidence, class_id, class_prob]
             conf_th: confidence threshold
         # Returns
-            boxes, scores, classes
+            detections array of shape (20, 6)
         """
-        # filter low-conf detections and concatenate results of all yolo layers
         detection_list = []
         for o in trt_outputs:
             detections = o.reshape((-1, 7))
@@ -298,45 +239,15 @@ class TensorRtDetector(DetectionApi):
             detection_list.append(detections)
         detection_list = np.concatenate(detection_list, axis=0)
 
-        return detection_list
-
-    def detect_raw(self, tensor_input):
-        # Input tensor has the shape of the [height, width, 3]
-        # Output tensor of float32 of shape [20, 6] where:
-        # O - class id
-        # 1 - score
-        # 2..5 - a value between 0 and 1 of the box: [top, left, bottom, right]
-
-        # normalize
-        if self.input_shape[-1] != trt.int8:
-            tensor_input = tensor_input.astype(self.input_shape[-1])
-            tensor_input /= 255.0
-
-        self.inputs[0].host = np.ascontiguousarray(
-            tensor_input.astype(self.input_shape[-1])
-        )
-        trt_outputs = self._do_inference()
-
-        raw_detections = self._postprocess_yolo(trt_outputs, self.conf_th)
-
-        if len(raw_detections) == 0:
+        if len(detection_list) == 0:
             return np.zeros((20, 6), np.float32)
 
-        # raw_detections: Nx7 numpy arrays of
-        #             [[x, y, w, h, box_confidence, class_id, class_prob],
-
-        # Calculate score as box_confidence x class_prob
-        raw_detections[:, 4] = raw_detections[:, 4] * raw_detections[:, 6]
-        # Reorder elements by the score, best on top, remove class_prob
-        ordered = raw_detections[raw_detections[:, 4].argsort()[::-1]][:, 0:6]
-        # transform width to right with clamp to 0..1
+        detection_list[:, 4] = detection_list[:, 4] * detection_list[:, 6]
+        ordered = detection_list[detection_list[:, 4].argsort()[::-1]][:, 0:6]
         ordered[:, 2] = np.clip(ordered[:, 2] + ordered[:, 0], 0, 1)
-        # transform height to bottom with clamp to 0..1
         ordered[:, 3] = np.clip(ordered[:, 3] + ordered[:, 1], 0, 1)
-        # put result into the correct order and limit to top 20
         detections = ordered[:, [5, 4, 1, 0, 3, 2]][:20]
 
-        # pad to 20x6 shape
         append_cnt = 20 - len(detections)
         if append_cnt > 0:
             detections = np.append(
@@ -344,3 +255,54 @@ class TensorRtDetector(DetectionApi):
             )
 
         return detections
+
+    def detect_raw(self, tensor_input):
+        # Output tensor of float32 of shape [20, 6] where:
+        # 0 - class id
+        # 1 - score
+        # 2..5 - a value between 0 and 1 of the box: [top, left, bottom, right]
+
+        if self.model_type == ModelTypeEnum.dfine:
+            np.copyto(self.inputs[0].host, tensor_input.ravel(), casting="unsafe")
+            np.copyto(
+                self.inputs[1].host,
+                np.array([[self.height, self.width]], dtype=np.int64).ravel(),
+            )
+            trt_outputs = self._do_inference()
+            return post_process_dfine(trt_outputs, self.width, self.height)
+
+        np.copyto(self.inputs[0].host, tensor_input.ravel(), casting="unsafe")
+        trt_outputs = self._do_inference()
+
+        if self.model_type == ModelTypeEnum.rfdetr:
+            return post_process_rfdetr(trt_outputs)
+        elif self.model_type == ModelTypeEnum.yologeneric:
+            return post_process_yolo(trt_outputs, self.width, self.height)
+        elif self.model_type == ModelTypeEnum.yolox:
+            return post_process_yolox(
+                trt_outputs[0],
+                self.width,
+                self.height,
+                self.grids,
+                self.expanded_strides,
+            )
+        elif self.model_type == ModelTypeEnum.yolonas:
+            predictions = trt_outputs[0]
+            detections = np.zeros((20, 6), np.float32)
+            for i, prediction in enumerate(predictions):
+                if i == 20:
+                    break
+                (_, x_min, y_min, x_max, y_max, confidence, class_id) = prediction
+                if class_id < 0:
+                    break
+                detections[i] = [
+                    class_id,
+                    confidence,
+                    y_min / self.height,
+                    x_min / self.width,
+                    y_max / self.height,
+                    x_max / self.width,
+                ]
+            return detections
+        else:  # ssd / legacy YOLO TRT format
+            return self._postprocess_yolo(trt_outputs, self.thresh)

@@ -1,0 +1,7 @@
+FROM ghcr.io/blakeblackshear/frigate:0.17.0-rc2-tensorrt
+
+RUN rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED && \
+    pip install --no-cache-dir --upgrade --break-system-packages \
+    --extra-index-url https://pypi.nvidia.com \
+    tensorrt-cu12==10.14.1.48.post1 tensorrt-cu12-libs==10.14.1.48.post1 tensorrt-cu12-bindings==10.14.1.48.post1 cuda-python==12.9.1 py-spy
+
