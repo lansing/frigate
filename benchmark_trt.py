@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """TensorRT detector benchmark. Mimics DetectorRunner.run() from object_detection/base.py."""
 
+"""
+docker run --runtime nvidia  -ti  -v /home/max/Code/frigate/frigate:/opt/frigate/frigate -v /home/max/Code/frigate/benchmark_trt.py:/opt/frigate/benchmark_trt.py -v /home/max/frigate/config:/config -v /home/max/frigate/models:/models -v /home/max/frigate/storage/:/media/frigate --entrypoint python3  blakeblackshear/frigate:0.17.0-rc2-tensorrt-real benchmark_trt.py --config /config/config.yaml --warmup 1000 --iters 10000
+
+"""
 import argparse
 import time
 
@@ -15,9 +19,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Benchmark a TensorRT (or any) Frigate detector."
     )
-    parser.add_argument(
-        "--config", required=True, help="Path to frigate config.yml"
-    )
+    parser.add_argument("--config", required=True, help="Path to frigate config.yml")
     parser.add_argument(
         "--detector",
         default=None,
