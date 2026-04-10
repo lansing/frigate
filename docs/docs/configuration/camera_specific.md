@@ -23,6 +23,7 @@ Some cameras support h265 with different formats, but Safari only supports the a
 cameras:
   h265_cam: # <------ Doesn't matter what the camera is called
     ffmpeg:
+      # highlight-next-line
       apple_compatibility: true # <- Adds compatibility with MacOS and iPhone
 ```
 
@@ -30,7 +31,7 @@ cameras:
 
 Note that mjpeg cameras require encoding the video into h264 for recording, and restream roles. This will use significantly more CPU than if the cameras supported h264 feeds directly. It is recommended to use the restream role to create an h264 restream and then use that as the source for ffmpeg.
 
-```yaml
+```yaml {3,10}
 go2rtc:
   streams:
     mjpeg_cam: "ffmpeg:http://your_mjpeg_stream_url#video=h264#hardware" # <- use hardware acceleration to create an h264 stream usable for other components.
@@ -96,6 +97,7 @@ This camera is H.265 only. To be able to play clips on some devices (like MacOs 
 cameras:
   annkec800: # <------ Name the camera
     ffmpeg:
+      # highlight-next-line
       apple_compatibility: true # <- Adds compatibility with MacOS and iPhone
       output_args:
         record: preset-record-generic-audio-aac
@@ -147,7 +149,7 @@ WEB Digest Algorithm  - MD5
 Reolink has many different camera models with inconsistently supported features and behavior. The below table shows a summary of various features and recommendations.
 
 | Camera Resolution | Camera Generation         | Recommended Stream Type           | Additional Notes                                                        |
-| ----------------  | ------------------------- | --------------------------------  | ----------------------------------------------------------------------- |
+| ----------------- | ------------------------- | --------------------------------- | ----------------------------------------------------------------------- |
 | 5MP or lower      | All                       | http-flv                          | Stream is h264                                                          |
 | 6MP or higher     | Latest (ex: Duo3, CX-8##) | http-flv with ffmpeg 8.0, or rtsp | This uses the new http-flv-enhanced over H265 which requires ffmpeg 8.0 |
 | 6MP or higher     | Older (ex: RLC-8##)       | rtsp                              |                                                                         |
@@ -188,10 +190,10 @@ go2rtc:
     # example for connectin to a Reolink camera that supports two way talk
     your_reolink_camera_twt:
       - "ffmpeg:http://reolink_ip/flv?port=1935&app=bcs&stream=channel0_main.bcs&user=username&password=password#video=copy#audio=copy#audio=opus"
-      - "rtsp://username:password@reolink_ip/Preview_01_sub
+      - "rtsp://username:password@reolink_ip/Preview_01_sub"
     your_reolink_camera_twt_sub:
       - "ffmpeg:http://reolink_ip/flv?port=1935&app=bcs&stream=channel0_ext.bcs&user=username&password=password"
-      - "rtsp://username:password@reolink_ip/Preview_01_sub
+      - "rtsp://username:password@reolink_ip/Preview_01_sub"
     # example for connecting to a Reolink NVR
     your_reolink_camera_via_nvr:
       - "ffmpeg:http://reolink_nvr_ip/flv?port=1935&app=bcs&stream=channel3_main.bcs&user=username&password=password" # channel numbers are 0-15
@@ -244,7 +246,7 @@ go2rtc:
       - rtspx://192.168.1.1:7441/abcdefghijk
 ```
 
-[See the go2rtc docs for more information](https://github.com/AlexxIT/go2rtc/tree/v1.9.9#source-rtsp)
+[See the go2rtc docs for more information](https://github.com/AlexxIT/go2rtc/tree/v1.9.10#source-rtsp)
 
 In the Unifi 2.0 update Unifi Protect Cameras had a change in audio sample rate which causes issues for ffmpeg. The input rate needs to be set for record if used directly with unifi protect.
 
@@ -258,18 +260,23 @@ ffmpeg:
 
 TP-Link VIGI cameras need some adjustments to the main stream settings on the camera itself to avoid issues. The stream needs to be configured as `H264` with `Smart Coding` set to `off`. Without these settings you may have problems when trying to watch recorded footage. For example Firefox will stop playback after a few seconds and show the following error message: `The media playback was aborted due to a corruption problem or because the media used features your browser did not support.`.
 
+### Wyze Wireless Cameras
+
+Some community members have found better performance on Wyze cameras by using an alternative firmware known as [Thingino](https://thingino.com/).
+
 ## USB Cameras (aka Webcams)
 
 To use a USB camera (webcam) with Frigate, the recommendation is to use go2rtc's [FFmpeg Device](https://github.com/AlexxIT/go2rtc?tab=readme-ov-file#source-ffmpeg-device) support:
 
 - Preparation outside of Frigate:
+
   - Get USB camera path. Run `v4l2-ctl --list-devices` to get a listing of locally-connected cameras available. (You may need to install `v4l-utils` in a way appropriate for your Linux distribution). In the sample configuration below, we use `video=0` to correlate with a detected device path of `/dev/video0`
   - Get USB camera formats & resolutions. Run `ffmpeg -f v4l2 -list_formats all -i /dev/video0` to get an idea of what formats and resolutions the USB Camera supports. In the sample configuration below, we use a width of 1024 and height of 576 in the stream and detection settings based on what was reported back.
   - If using Frigate in a container (e.g. Docker on TrueNAS), ensure you have USB Passthrough support enabled, along with a specific Host Device (`/dev/video0`) + Container Device (`/dev/video0`) listed.
 
 - In your Frigate Configuration File, add the go2rtc stream and roles as appropriate:
 
-```
+```yaml {4,11-12}
 go2rtc:
   streams:
     usb_camera:
@@ -290,5 +297,3 @@ cameras:
       width: 1024
       height: 576
 ```
-
-

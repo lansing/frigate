@@ -10,7 +10,7 @@ const config: Config = {
   baseUrl: "/",
   onBrokenLinks: "throw",
   onBrokenMarkdownLinks: "warn",
-  favicon: "img/favicon.ico",
+  favicon: "img/branding/favicon.ico",
   organizationName: "blakeblackshear",
   projectName: "frigate",
   themes: [
@@ -83,6 +83,17 @@ const config: Config = {
       },
     },
     prism: {
+      magicComments:[
+        {
+          className: 'theme-code-block-highlighted-line',
+          line: 'highlight-next-line',
+          block: {start: 'highlight-start', end: 'highlight-end'},
+        },
+        {
+          className: 'code-block-error-line',
+          line: 'highlight-error-line',
+        },
+      ],
       additionalLanguages: ["bash", "json"],
     },
     languageTabs: [
@@ -116,8 +127,8 @@ const config: Config = {
       title: "Frigate",
       logo: {
         alt: "Frigate",
-        src: "img/logo.svg",
-        srcDark: "img/logo-dark.svg",
+        src: "img/branding/logo.svg",
+        srcDark: "img/branding/logo-dark.svg",
       },
       items: [
         {
@@ -170,7 +181,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Blake Blackshear`,
+      copyright: `Copyright © ${new Date().getFullYear()} Frigate, Inc.`,
     },
   },
   plugins: [

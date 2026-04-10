@@ -9,7 +9,7 @@ title: Getting started
 
 If you already have an environment with Linux and Docker installed, you can continue to [Installing Frigate](#installing-frigate) below.
 
-If you already have Frigate installed through Docker or through a Home Assistant Add-on, you can continue to [Configuring Frigate](#configuring-frigate) below.
+If you already have Frigate installed through Docker or through a Home Assistant App, you can continue to [Configuring Frigate](#configuring-frigate) below.
 
 :::
 
@@ -81,7 +81,7 @@ Now you have a minimal Debian server that requires very little maintenance.
 
 ## Installing Frigate
 
-This section shows how to create a minimal directory structure for a Docker installation on Debian. If you have installed Frigate as a Home Assistant Add-on or another way, you can continue to [Configuring Frigate](#configuring-frigate).
+This section shows how to create a minimal directory structure for a Docker installation on Debian. If you have installed Frigate as a Home Assistant App or another way, you can continue to [Configuring Frigate](#configuring-frigate).
 
 ### Setup directories
 
@@ -119,7 +119,7 @@ services:
     volumes:
       - ./config:/config
       - ./storage:/media/frigate
-      - type: tmpfs # Optional: 1GB of memory, reduces SSD/SD Card wear
+      - type: tmpfs # 1GB In-memory filesystem for recording segment storage
         target: /tmp/cache
         tmpfs:
           size: 1000000000
@@ -134,31 +134,13 @@ Now you should be able to start Frigate by running `docker compose up -d` from w
 
 This section assumes that you already have an environment setup as described in [Installation](../frigate/installation.md). You should also configure your cameras according to the [camera setup guide](/frigate/camera_setup). Pay particular attention to the section on choosing a detect resolution.
 
-### Step 1: Add a detect stream
+### Step 1: Start Frigate
 
-First we will add the detect stream for the camera:
+At this point you should be able to start Frigate and a basic config will be created automatically.
 
-```yaml
-mqtt:
-  enabled: False
+### Step 2: Add a camera
 
-cameras:
-  name_of_your_camera: # <------ Name the camera
-    enabled: True
-    ffmpeg:
-      inputs:
-        - path: rtsp://10.0.10.10:554/rtsp # <----- The stream you want to use for detection
-          roles:
-            - detect
-```
-
-### Step 2: Start Frigate
-
-At this point you should be able to start Frigate and see the video feed in the UI.
-
-If you get an error image from the camera, this means ffmpeg was not able to get the video feed from your camera. Check the logs for error messages from ffmpeg. The default ffmpeg arguments are designed to work with H264 RTSP cameras that support TCP connections.
-
-FFmpeg arguments for other types of cameras can be found [here](../configuration/camera_specific.md).
+You can click the `Add Camera` button to use the camera setup wizard to get your first camera added into Frigate.
 
 ### Step 3: Configure hardware acceleration (recommended)
 
@@ -168,12 +150,12 @@ Here is an example configuration with hardware acceleration configured to work w
 
 `docker-compose.yml` (after modifying, you will need to run `docker compose up -d` to apply changes)
 
-```yaml
+```yaml {4,5}
 services:
   frigate:
     ...
     devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128 # for intel hwaccel, needs to be updated for your hardware
+      - /dev/dri/renderD128:/dev/dri/renderD128 # for intel & amd hwaccel, needs to be updated for your hardware
     ...
 ```
 
@@ -186,17 +168,57 @@ cameras:
   name_of_your_camera:
     ffmpeg:
       inputs: ...
+      # highlight-next-line
       hwaccel_args: preset-vaapi
     detect: ...
 ```
 
 ### Step 4: Configure detectors
 
-By default, Frigate will use a single CPU detector. If you have a USB Coral, you will need to add a detectors section to your config.
+By default, Frigate will use a single CPU detector.
+
+In many cases, the integrated graphics on Intel CPUs provides sufficient performance for typical Frigate setups. If you have an Intel processor, you can follow the configuration below.
+
+<details>
+  <summary>Use Intel OpenVINO detector</summary>
+
+You need to refer to **Configure hardware acceleration** above to enable the container to use the GPU.
+
+```yaml {3-6,9-15,20-21}
+mqtt: ...
+
+detectors: # <---- add detectors
+  ov:
+    type: openvino  # <---- use openvino detector
+    device: GPU
+
+# We will use the default MobileNet_v2 model from OpenVINO.
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+
+cameras:
+  name_of_your_camera:
+    ffmpeg: ...
+    detect:
+      enabled: True # <---- turn on detection
+      ...
+```
+
+</details>
+
+If you have a USB Coral, you will need to add a detectors section to your config.
+
+<details>
+   <summary>Use USB Coral detector</summary>
 
 `docker-compose.yml` (after modifying, you will need to run `docker compose up -d` to apply changes)
 
-```yaml
+```yaml {4-6}
 services:
   frigate:
     ...
@@ -206,7 +228,7 @@ services:
     ...
 ```
 
-```yaml
+```yaml {3-6,11-12}
 mqtt: ...
 
 detectors: # <---- add detectors
@@ -221,6 +243,8 @@ cameras:
       enabled: True # <---- turn on detection
       ...
 ```
+
+</details>
 
 More details on available detectors can be found [here](../configuration/object_detectors.md).
 
@@ -240,7 +264,7 @@ Note that motion masks should not be used to mark out areas where you do not wan
 
 Your configuration should look similar to this now.
 
-```yaml
+```yaml {16-18}
 mqtt:
   enabled: False
 
@@ -267,7 +291,7 @@ In order to review activity in the Frigate UI, recordings need to be enabled.
 
 To enable recording video, add the `record` role to a stream and enable it in the config. If record is disabled in the config, it won't be possible to enable it in the UI.
 
-```yaml
+```yaml {16-17}
 mqtt: ...
 
 detectors: ...

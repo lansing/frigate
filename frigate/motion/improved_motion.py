@@ -6,7 +6,6 @@ from line_profiler import profile
 from scipy.ndimage import gaussian_filter
 
 from frigate.camera import PTZMetrics
-from frigate.comms.config_updater import ConfigSubscriber
 from frigate.config import MotionConfig
 from frigate.motion import MotionDetector
 from frigate.util.image import grab_cv2_contours
@@ -37,12 +36,7 @@ class ImprovedMotionDetector(MotionDetector):
         self.avg_frame = np.zeros(self.motion_frame_size, np.float32)
         self.motion_frame_count = 0
         self.frame_counter = 0
-        resized_mask = cv2.resize(
-            config.mask,
-            dsize=(self.motion_frame_size[1], self.motion_frame_size[0]),
-            interpolation=cv2.INTER_AREA,
-        )
-        self.mask = np.where(resized_mask == [0])
+        self.update_mask()
         self.save_images = False
         self.calibrating = True
         self.blur_radius = blur_radius
@@ -50,19 +44,8 @@ class ImprovedMotionDetector(MotionDetector):
         self.contrast_values = np.zeros((contrast_frame_history, 2), np.uint8)
         self.contrast_values[:, 1:2] = 255
         self.contrast_values_index = 0
-        self.config_subscriber = ConfigSubscriber(f"config/motion/{name}", True)
         self.ptz_metrics = ptz_metrics
         self.last_stop_time = None
-
-        self.inv_mask = np.full(
-            (self.motion_frame_size[0], self.motion_frame_size[1]), 255, dtype=np.uint8
-        )
-
-        # 2. Use your existing indices to "black out" the masked areas (0 = black)
-        # Since your debug shows two arrays of 39900, it looks like boolean indexing
-        # was converted to coordinates.
-        # If self.mask is the result of np.where(bool_mask), you can do:
-        self.inv_mask[self.mask] = 0
 
         self.contrast_sum = 0
         self.lut = np.zeros((256,), dtype=np.uint8)
@@ -73,12 +56,6 @@ class ImprovedMotionDetector(MotionDetector):
     @profile
     def detect(self, frame):
         motion_boxes = []
-
-        # check for updated motion config
-        _, updated_motion_config = self.config_subscriber.check_for_update()
-
-        if updated_motion_config:
-            self.config = updated_motion_config
 
         if not self.config.enabled:
             return motion_boxes
@@ -122,6 +99,7 @@ class ImprovedMotionDetector(MotionDetector):
             min_value, max_value = self.percentile_via_histogram(resized_frame)
             # print(f"{min_value_old}->{min_value} {max_value_old}->{max_value}")
             if min_value < max_value:
+                # TODO this is probably not worth the effort? it's just a mean of 50 numbers..
                 # keep track of the last 50 contrast values
                 # self.contrast_values[self.contrast_values_index] = [
                 #     min_value,
@@ -154,6 +132,8 @@ class ImprovedMotionDetector(MotionDetector):
                 # resized_frame = (
                 #     ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
                 # ).astype(np.uint8)
+
+                # But the LUT approach is probably good?
 
                 # 1. Update the LUT (only 256 iterations - extremely fast)
                 # This replaces both the np.clip and the (val - min) / (max - min) math
@@ -343,6 +323,25 @@ class ImprovedMotionDetector(MotionDetector):
         max_value = np.searchsorted(cum_hist, max_thresh).astype(np.uint8)
         return min_value, max_value
 
+    def update_mask(self) -> None:
+        resized_mask = cv2.resize(
+            self.config.mask,
+            dsize=(self.motion_frame_size[1], self.motion_frame_size[0]),
+            interpolation=cv2.INTER_AREA,
+        )
+        self.mask = np.where(resized_mask == [0])
+
+        self.inv_mask = np.full(
+            (self.motion_frame_size[0], self.motion_frame_size[1]), 255, dtype=np.uint8
+        )
+        self.inv_mask[self.mask] = 0
+
+        # Reset motion detection state when mask changes
+        # so motion detection can quickly recalibrate with the new mask
+        self.avg_frame = np.zeros(self.motion_frame_size, np.float32)
+        self.calibrating = True
+        self.motion_frame_count = 0
+
     def stop(self) -> None:
         """stop the motion detector."""
-        self.config_subscriber.stop()
+        pass

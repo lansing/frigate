@@ -120,7 +120,7 @@ Message published for each changed tracked object. The first message is publishe
 
 ### `frigate/tracked_object_update`
 
-Message published for updates to tracked object metadata, for example:
+Message published for updates to tracked object metadata. All messages include an `id` field which is the tracked object's event ID, and can be used to look up the event via the API or match it to items in the UI.
 
 #### Generative AI Description Update
 
@@ -134,12 +134,14 @@ Message published for updates to tracked object metadata, for example:
 
 #### Face Recognition Update
 
+Published after each recognition attempt, regardless of whether the score meets `recognition_threshold`. See the [Face Recognition](/configuration/face_recognition) documentation for details on how scoring works.
+
 ```json
 {
   "type": "face",
   "id": "1607123955.475377-mxklsc",
-  "name": "John",
-  "score": 0.95,
+  "name": "John", // best matching person, or null if no match
+  "score": 0.95, // running weighted average across all recognition attempts
   "camera": "front_door_cam",
   "timestamp": 1607123958.748393
 }
@@ -147,11 +149,13 @@ Message published for updates to tracked object metadata, for example:
 
 #### License Plate Recognition Update
 
+Published when a license plate is recognized on a car object. See the [License Plate Recognition](/configuration/license_plate_recognition) documentation for details.
+
 ```json
 {
   "type": "lpr",
   "id": "1607123955.475377-mxklsc",
-  "name": "John's Car",
+  "name": "John's Car", // known name for the plate, or null
   "plate": "123ABC",
   "score": 0.95,
   "camera": "driveway_cam",
@@ -159,11 +163,44 @@ Message published for updates to tracked object metadata, for example:
 }
 ```
 
+#### Object Classification Update
+
+Message published when [object classification](/configuration/custom_classification/object_classification) reaches consensus on a classification result.
+
+**Sub label type:**
+
+```json
+{
+  "type": "classification",
+  "id": "1607123955.475377-mxklsc",
+  "camera": "front_door_cam",
+  "timestamp": 1607123958.748393,
+  "model": "person_classifier",
+  "sub_label": "delivery_person",
+  "score": 0.87
+}
+```
+
+**Attribute type:**
+
+```json
+{
+  "type": "classification",
+  "id": "1607123955.475377-mxklsc",
+  "camera": "front_door_cam",
+  "timestamp": 1607123958.748393,
+  "model": "helmet_detector",
+  "attribute": "yes",
+  "score": 0.92
+}
+```
+
 ### `frigate/reviews`
 
-Message published for each changed review item. The first message is published when the `detection` or `alert` is initiated. 
+Message published for each changed review item. The first message is published when the `detection` or `alert` is initiated.
 
 An `update` with the same ID will be published when:
+
 - The severity changes from `detection` to `alert`
 - Additional objects are detected
 - An object is recognized via face, lpr, etc.
@@ -215,6 +252,20 @@ When the review activity has ended a final `end` message is published.
 }
 ```
 
+### `frigate/triggers`
+
+Message published when a trigger defined in a camera's `semantic_search` configuration fires.
+
+```json
+{
+  "name": "car_trigger",
+  "camera": "driveway",
+  "event_id": "1751565549.853251-b69j73",
+  "type": "thumbnail",
+  "score": 0.85
+}
+```
+
 ### `frigate/stats`
 
 Same data available at `/api/stats` published at a configurable interval.
@@ -232,6 +283,14 @@ Topic to turn notifications on and off. Expected values are `ON` and `OFF`.
 Topic with current state of notifications. Published values are `ON` and `OFF`.
 
 ## Frigate Camera Topics
+
+### `frigate/<camera_name>/status/<role>`
+
+Publishes the current health status of each role that is enabled (`audio`, `detect`, `record`). Possible values are:
+
+- `online`: Stream is running and being processed
+- `offline`: Stream is offline and is being restarted
+- `disabled`: Camera is currently disabled
 
 ### `frigate/<camera_name>/<object_name>`
 
@@ -266,6 +325,8 @@ The height and crop of snapshots can be configured in the config.
 
 Publishes "ON" when a type of audio is detected and "OFF" when it is not for the camera for use as a sensor in Home Assistant.
 
+`all` can be used as the audio_type for the status of all audio types.
+
 ### `frigate/<camera_name>/audio/dBFS`
 
 Publishes the dBFS value for audio detected on this camera.
@@ -277,6 +338,17 @@ Publishes the dBFS value for audio detected on this camera.
 Publishes the rms value for audio detected on this camera.
 
 **NOTE:** Requires audio detection to be enabled
+
+### `frigate/<camera_name>/audio/transcription`
+
+Publishes transcribed text for audio detected on this camera.
+
+**NOTE:** Requires audio detection and transcription to be enabled
+
+### `frigate/<camera_name>/classification/<model_name>`
+
+Publishes the current state detected by a state classification model for the camera. The topic name includes the model name as configured in your classification settings.
+The published value is the detected state class name (e.g., `open`, `closed`, `on`, `off`). The state is only published when it changes, helping to reduce unnecessary MQTT traffic.
 
 ### `frigate/<camera_name>/enabled/set`
 
@@ -399,6 +471,22 @@ Topic to turn review detections for a camera on or off. Expected values are `ON`
 ### `frigate/<camera_name>/review_detections/state`
 
 Topic with current state of review detections for a camera. Published values are `ON` and `OFF`.
+
+### `frigate/<camera_name>/object_descriptions/set`
+
+Topic to turn generative AI object descriptions for a camera on or off. Expected values are `ON` and `OFF`.
+
+### `frigate/<camera_name>/object_descriptions/state`
+
+Topic with current state of generative AI object descriptions for a camera. Published values are `ON` and `OFF`.
+
+### `frigate/<camera_name>/review_descriptions/set`
+
+Topic to turn generative AI review descriptions for a camera on or off. Expected values are `ON` and `OFF`.
+
+### `frigate/<camera_name>/review_descriptions/state`
+
+Topic with current state of generative AI review descriptions for a camera. Published values are `ON` and `OFF`.
 
 ### `frigate/<camera_name>/birdseye/set`
 

@@ -50,6 +50,42 @@ function set_libva_version() {
     export LIBAVFORMAT_VERSION_MAJOR
 }
 
+function setup_homekit_config() {
+    local config_path="$1"
+
+    if [[ ! -f "${config_path}" ]]; then
+        echo "[INFO] Creating empty config file for HomeKit..."
+        : > "${config_path}"
+    fi
+
+    # Convert YAML to JSON for jq processing
+    local temp_json="/tmp/cache/homekit_config.json"
+    yq eval -o=json "${config_path}" > "${temp_json}" 2>/dev/null || {
+        echo "[WARNING] Failed to convert HomeKit config to JSON, skipping cleanup"
+        return 0
+    }
+
+    # Use jq to extract the homekit section, if it exists
+    local homekit_json
+    homekit_json=$(jq '
+        if has("homekit") then {homekit: .homekit} else null end
+    ' "${temp_json}" 2>/dev/null) || homekit_json="null"
+
+    # If no homekit section, write an empty config file
+    if [[ "${homekit_json}" == "null" ]]; then
+        : > "${config_path}"
+    else
+        # Convert homekit JSON back to YAML and write to the config file
+        echo "${homekit_json}" | yq eval -P - > "${config_path}" 2>/dev/null || {
+            echo "[WARNING] Failed to convert cleaned config to YAML, creating minimal config"
+            : > "${config_path}"
+        }
+    fi
+
+    # Clean up temp files
+    rm -f "${temp_json}"
+}
+
 set_libva_version
 
 if [[ -f "/dev/shm/go2rtc.yaml" ]]; then
@@ -70,6 +106,10 @@ else
     echo "[WARNING] Unable to remove existing go2rtc config. Changes made to your frigate config file may not be recognized. Please remove the /dev/shm/go2rtc.yaml from your docker host manually."
 fi
 
+# HomeKit configuration persistence setup
+readonly homekit_config_path="/config/go2rtc_homekit.yml"
+setup_homekit_config "${homekit_config_path}"
+
 readonly config_path="/config"
 
 if [[ -x "${config_path}/go2rtc" ]]; then
@@ -82,5 +122,7 @@ fi
 echo "[INFO] Starting go2rtc..."
 
 # Replace the bash process with the go2rtc process, redirecting stderr to stdout
+# Use HomeKit config as the primary config so writebacks go there
+# The main config from Frigate will be loaded as a secondary config
 exec 2>&1
-exec "${binary_path}" -config=/dev/shm/go2rtc.yaml
+exec "${binary_path}" -config="${homekit_config_path}" -config=/dev/shm/go2rtc.yaml

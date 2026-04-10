@@ -42,19 +42,27 @@ export default function AccountSettings({ className }: AccountSettingsProps) {
   const logoutUrl = config?.proxy?.logout_url || `${baseUrl}api/logout`;
 
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [isPasswordLoading, setIsPasswordLoading] = useState(false);
 
   const Container = isDesktop ? DropdownMenu : Drawer;
   const Trigger = isDesktop ? DropdownMenuTrigger : DrawerTrigger;
   const Content = isDesktop ? DropdownMenuContent : DrawerContent;
   const MenuItem = isDesktop ? DropdownMenuItem : DrawerClose;
 
-  const handlePasswordSave = async (password: string) => {
+  const handlePasswordSave = async (password: string, oldPassword?: string) => {
     if (!profile?.username || profile.username === "anonymous") return;
+    setIsPasswordLoading(true);
     axios
-      .put(`users/${profile.username}/password`, { password })
+      .put(`users/${profile.username}/password`, {
+        password,
+        old_password: oldPassword,
+      })
       .then((response) => {
         if (response.status === 200) {
           setPasswordDialogOpen(false);
+          setPasswordError(null);
+          setIsPasswordLoading(false);
           toast.success(t("users.toast.success.updatePassword"), {
             position: "top-center",
           });
@@ -65,14 +73,10 @@ export default function AccountSettings({ className }: AccountSettingsProps) {
           error.response?.data?.message ||
           error.response?.data?.detail ||
           "Unknown error";
-        toast.error(
-          t("users.toast.error.setPasswordFailed", {
-            errorMessage,
-          }),
-          {
-            position: "top-center",
-          },
-        );
+
+        // Keep dialog open and show error
+        setPasswordError(errorMessage);
+        setIsPasswordLoading(false);
       });
   };
 
@@ -122,19 +126,21 @@ export default function AccountSettings({ className }: AccountSettingsProps) {
 
           <DropdownMenuSeparator className={isDesktop ? "my-2" : "my-2"} />
 
-          {profile?.username && profile.username !== "anonymous" && (
-            <MenuItem
-              className={cn(
-                "flex w-full items-center gap-2",
-                isDesktop ? "cursor-pointer" : "p-2 text-sm",
-              )}
-              aria-label={t("menu.user.setPassword", { ns: "common" })}
-              onClick={() => setPasswordDialogOpen(true)}
-            >
-              <LuSquarePen className="mr-2 size-4" />
-              <span>{t("menu.user.setPassword", { ns: "common" })}</span>
-            </MenuItem>
-          )}
+          {config?.auth?.enabled !== false &&
+            profile?.username &&
+            profile.username !== "anonymous" && (
+              <MenuItem
+                className={cn(
+                  "flex w-full items-center gap-2",
+                  isDesktop ? "cursor-pointer" : "p-2 text-sm",
+                )}
+                aria-label={t("menu.user.setPassword", { ns: "common" })}
+                onClick={() => setPasswordDialogOpen(true)}
+              >
+                <LuSquarePen className="mr-2 size-4" />
+                <span>{t("menu.user.setPassword", { ns: "common" })}</span>
+              </MenuItem>
+            )}
 
           <MenuItem
             className={cn(
@@ -154,8 +160,13 @@ export default function AccountSettings({ className }: AccountSettingsProps) {
       <SetPasswordDialog
         show={passwordDialogOpen}
         onSave={handlePasswordSave}
-        onCancel={() => setPasswordDialogOpen(false)}
+        onCancel={() => {
+          setPasswordDialogOpen(false);
+          setPasswordError(null);
+        }}
+        initialError={passwordError}
         username={profile?.username}
+        isLoading={isPasswordLoading}
       />
     </Container>
   );
