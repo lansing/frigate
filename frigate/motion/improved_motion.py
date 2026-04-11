@@ -2,7 +2,6 @@ import logging
 
 import cv2
 import numpy as np
-from scipy.ndimage import gaussian_filter
 
 from frigate.camera import PTZMetrics
 from frigate.config import MotionConfig
@@ -85,8 +84,7 @@ class ImprovedMotionDetector(MotionDetector):
         # Improve contrast
         if self.config.improve_contrast:
             # TODO tracking moving average of min/max to avoid sudden contrast changes
-            min_value = np.percentile(resized_frame, 4).astype(np.uint8)
-            max_value = np.percentile(resized_frame, 96).astype(np.uint8)
+            min_value, max_value = self.percentiles(resized_frame)
             # skip contrast calcs if the image is a single color
             if min_value < max_value:
                 # keep track of the last 50 contrast values
@@ -100,10 +98,10 @@ class ImprovedMotionDetector(MotionDetector):
 
                 avg_min, avg_max = np.mean(self.contrast_values, axis=0)
 
-                resized_frame = np.clip(resized_frame, avg_min, avg_max)
-                resized_frame = (
-                    ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
+                lut = np.clip(
+                    (np.arange(256) - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255
                 ).astype(np.uint8)
+                resized_frame = cv2.LUT(resized_frame, lut)
 
         if self.save_images:
             contrasted_saved = resized_frame.copy()
@@ -111,9 +109,11 @@ class ImprovedMotionDetector(MotionDetector):
         # mask frame
         # this has to come after contrast improvement
         # Setting masked pixels to zero, to match the average frame at startup
-        resized_frame[self.mask] = [0]
+        resized_frame = cv2.bitwise_and(
+            resized_frame, resized_frame, mask=self.inv_mask
+        )
 
-        resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+        resized_frame = self.gaussian(resized_frame)
 
         if self.save_images:
             blurred_saved = resized_frame.copy()
@@ -231,6 +231,20 @@ class ImprovedMotionDetector(MotionDetector):
 
         return motion_boxes
 
+    def gaussian(self, resized_frame):
+        k_size = int(self.blur_radius * 2 + 1)
+        if k_size % 2 == 0:
+            k_size += 1
+        return cv2.GaussianBlur(resized_frame, (k_size, k_size), sigmaX=1)
+
+    def percentiles(self, resized_frame):
+        hist = cv2.calcHist([resized_frame], [0], None, [256], [0, 256]).flatten()
+        cum_hist = np.cumsum(hist)
+        total_pixels = resized_frame.size
+        min_value = np.searchsorted(cum_hist, total_pixels * 0.04).astype(np.uint8)
+        max_value = np.searchsorted(cum_hist, total_pixels * 0.96).astype(np.uint8)
+        return min_value, max_value
+
     def update_mask(self) -> None:
         resized_mask = cv2.resize(
             self.config.mask,
@@ -238,6 +252,11 @@ class ImprovedMotionDetector(MotionDetector):
             interpolation=cv2.INTER_AREA,
         )
         self.mask = np.where(resized_mask == [0])
+
+        self.inv_mask = np.full(
+            (self.motion_frame_size[0], self.motion_frame_size[1]), 255, dtype=np.uint8
+        )
+        self.inv_mask[self.mask] = 0
 
         # Reset motion detection state when mask changes
         # so motion detection can quickly recalibrate with the new mask
