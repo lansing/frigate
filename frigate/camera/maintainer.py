@@ -100,7 +100,7 @@ class CameraMaintainer(threading.Thread):
             return
 
         if runtime:
-            self.camera_metrics[name] = CameraMetrics(self.metrics_manager)
+            self.camera_metrics[name] = CameraMetrics()
             self.ptz_metrics[name] = PTZMetrics(autotracker_enabled=False)
             self.region_grids[name] = get_camera_regions_grid(
                 name,
