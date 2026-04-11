@@ -96,10 +96,10 @@ class ImprovedMotionDetector(MotionDetector):
             # TODO 16% of time
             # max_value_old = np.percentile(resized_frame, 96).astype(np.uint8)
             # skip contrast calcs if the image is a single color
+            # NOTE optimization 1: percentile_via_histogram instead of np.percentile usage
             min_value, max_value = self.percentile_via_histogram(resized_frame)
             # print(f"{min_value_old}->{min_value} {max_value_old}->{max_value}")
             if min_value < max_value:
-                # TODO this is probably not worth the effort? it's just a mean of 50 numbers..
                 # keep track of the last 50 contrast values
                 # self.contrast_values[self.contrast_values_index] = [
                 #     min_value,
@@ -110,7 +110,8 @@ class ImprovedMotionDetector(MotionDetector):
                 #     self.contrast_values_index = 0
 
                 # avg_min, avg_max = np.mean(self.contrast_values, axis=0)
-                #
+
+                # TODO go back to the original implementation (above, from keep track of the last 50 contrast values, until here)
                 # 1. Subtract the old value before overwriting it
                 old_val = self.contrast_values[self.contrast_values_index]
                 self.contrast_sum -= old_val
@@ -127,23 +128,21 @@ class ImprovedMotionDetector(MotionDetector):
 
                 # 4. Average is now a simple division, no iteration required
                 avg_min, avg_max = self.contrast_sum / 50.0
+                # TODO end the new contrast sum implementation that we want to abandon
 
                 # resized_frame = np.clip(resized_frame, avg_min, avg_max)
                 # resized_frame = (
                 #     ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
                 # ).astype(np.uint8)
 
-                # But the LUT approach is probably good?
-
-                # 1. Update the LUT (only 256 iterations - extremely fast)
+                # NOTE optimization 2 that we want to keep
                 # This replaces both the np.clip and the (val - min) / (max - min) math
                 bins = np.arange(256)
                 lut_values = np.clip(
                     (bins - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255
                 )
+                # TODO why is this an instance variable? just pass this to the next call inline if possible?
                 self.lut = lut_values.astype(np.uint8)
-
-                # 2. Apply the LUT to the whole image in one hardware-accelerated pass
                 resized_frame = cv2.LUT(resized_frame, self.lut)
 
         if self.save_images:
@@ -166,6 +165,7 @@ class ImprovedMotionDetector(MotionDetector):
         # print(self.inv_mask.shape)
         # print(f"resized_frame:")
         # print(resized_frame.shape)
+        # NOTE optimization 3 we want to keep
         resized_frame = cv2.bitwise_and(
             resized_frame, resized_frame, mask=self.inv_mask
         )
@@ -173,6 +173,7 @@ class ImprovedMotionDetector(MotionDetector):
         # TODO SLOW
         # TODO 16%
         # resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+        # NOTE optimization 4 we want to keep
         resized_frame = self.gaussian_via_cv2(resized_frame)
 
         if self.save_images:
