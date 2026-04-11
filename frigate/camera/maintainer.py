@@ -4,7 +4,7 @@ import logging
 import multiprocessing as mp
 import threading
 from multiprocessing import Queue
-from multiprocessing.managers import DictProxy, SyncManager
+from multiprocessing.managers import SyncManager
 from multiprocessing.synchronize import Event as MpEvent
 
 from frigate.camera import CameraMetrics, PTZMetrics
@@ -30,7 +30,7 @@ class CameraMaintainer(threading.Thread):
         config: FrigateConfig,
         detection_queue: Queue,
         detected_frames_queue: Queue,
-        camera_metrics: DictProxy,
+        camera_metrics: dict[str, CameraMetrics],
         ptz_metrics: dict[str, PTZMetrics],
         stop_event: MpEvent,
         metrics_manager: SyncManager,

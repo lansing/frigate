@@ -4,7 +4,6 @@ import datetime
 import logging
 import threading
 import time
-from multiprocessing.managers import DictProxy
 from multiprocessing.synchronize import Event as MpEvent
 from typing import Tuple
 
@@ -84,7 +83,7 @@ class AudioProcessor(FrigateProcess):
         self,
         config: FrigateConfig,
         cameras: list[CameraConfig],
-        camera_metrics: DictProxy,
+        camera_metrics: dict,
         stop_event: MpEvent,
     ):
         super().__init__(
@@ -146,7 +145,7 @@ class AudioEventMaintainer(threading.Thread):
         self,
         camera: CameraConfig,
         config: FrigateConfig,
-        camera_metrics: DictProxy,
+        camera_metrics: dict,
         audio_transcription_model_runner: AudioTranscriptionModelRunner | None,
         stop_event: threading.Event,
     ) -> None:

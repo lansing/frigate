@@ -5,7 +5,7 @@ import os
 import secrets
 import shutil
 from multiprocessing import Queue
-from multiprocessing.managers import DictProxy, SyncManager
+from multiprocessing.managers import SyncManager
 from multiprocessing.synchronize import Event as MpEvent
 from pathlib import Path
 from typing import Optional
@@ -93,7 +93,7 @@ class FrigateApp:
         self.detectors: dict[str, ObjectDetectProcess] = {}
         self.detection_shms: list[mp.shared_memory.SharedMemory] = []
         self.log_queue: Queue = mp.Queue()
-        self.camera_metrics: DictProxy = self.metrics_manager.dict()
+        self.camera_metrics: dict[str, CameraMetrics] = {}
         self.embeddings_metrics: DataProcessorMetrics | None = (
             DataProcessorMetrics(
                 self.metrics_manager, list(config.classification.custom.keys())
