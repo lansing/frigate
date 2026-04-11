@@ -14,7 +14,7 @@ class ConfigPublisher:
     """Publishes config changes to different processes."""
 
     def __init__(self) -> None:
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.bind(SOCKET_PUB_SUB)
         self.stop_event: MpEvent = mp.Event()
@@ -27,7 +27,6 @@ class ConfigPublisher:
     def stop(self) -> None:
         self.stop_event.set()
         self.socket.close()
-        self.context.destroy()
 
 
 class ConfigSubscriber:
@@ -36,7 +35,7 @@ class ConfigSubscriber:
     def __init__(self, topic: str, exact: bool = False) -> None:
         self.topic = topic
         self.exact = exact
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, topic)
         self.socket.connect(SOCKET_PUB_SUB)
@@ -56,4 +55,3 @@ class ConfigSubscriber:
 
     def stop(self) -> None:
         self.socket.close()
-        self.context.destroy()

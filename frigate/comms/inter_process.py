@@ -17,7 +17,7 @@ SOCKET_REP_REQ = "ipc:///tmp/cache/comms"
 
 class InterProcessCommunicator(Communicator):
     def __init__(self) -> None:
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.REP)
         self.socket.bind(SOCKET_REP_REQ)
         self.stop_event: MpEvent = mp.Event()
@@ -62,14 +62,13 @@ class InterProcessCommunicator(Communicator):
         self.stop_event.set()
         self.reader_thread.join()
         self.socket.close()
-        self.context.destroy()
 
 
 class InterProcessRequestor:
     """Simplifies sending data to InterProcessCommunicator and getting a reply."""
 
     def __init__(self) -> None:
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.REQ)
         self.socket.connect(SOCKET_REP_REQ)
 
@@ -83,4 +82,3 @@ class InterProcessRequestor:
 
     def stop(self) -> None:
         self.socket.close()
-        self.context.destroy()

@@ -57,7 +57,7 @@ class Publisher(Generic[T]):
 
     def __init__(self, topic: str = "") -> None:
         self.topic = f"{self.topic_base}{topic}"
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.connect(SOCKET_PUB)
 
@@ -67,7 +67,6 @@ class Publisher(Generic[T]):
 
     def stop(self) -> None:
         self.socket.close()
-        self.context.destroy()
 
 
 class Subscriber(Generic[T]):
@@ -77,7 +76,7 @@ class Subscriber(Generic[T]):
 
     def __init__(self, topic: str = "") -> None:
         self.topic = f"{self.topic_base}{topic}"
-        self.context = zmq.Context()
+        self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
         self.socket.connect(SOCKET_SUB)
@@ -97,7 +96,6 @@ class Subscriber(Generic[T]):
 
     def stop(self) -> None:
         self.socket.close()
-        self.context.destroy()
 
     def _return_object(self, topic: str, payload: T | None) -> T | None:
         return payload
