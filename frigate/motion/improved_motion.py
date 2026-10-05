@@ -137,6 +137,7 @@ class ImprovedMotionDetector(MotionDetector):
 
                 # NOTE optimization 2 that we want to keep
                 # This replaces both the np.clip and the (val - min) / (max - min) math
+                # TODO refactor this into two lines. no need to initialize bins, probably no need to assign self.lut.
                 bins = np.arange(256)
                 lut_values = np.clip(
                     (bins - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255
