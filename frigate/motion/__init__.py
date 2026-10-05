@@ -9,6 +9,7 @@ from frigate.config import MotionConfig
 
 if TYPE_CHECKING:
     from frigate.camera import PTZMetrics
+    from frigate.config.config import RuntimeMotionConfig
 
 
 class MotionDetector(ABC):
@@ -47,7 +48,7 @@ class MotionDetector(ABC):
 
 def create_motion_detector(
     frame_shape: tuple[int, int],
-    config: MotionConfig,
+    config: RuntimeMotionConfig,
     fps: int,
     name: str,
     ptz_metrics: PTZMetrics | None,

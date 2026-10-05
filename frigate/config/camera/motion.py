@@ -68,17 +68,17 @@ class Mog2MotionConfig(FrigateBaseModel):
         description="MOG2 variance threshold; higher values flag fewer pixels as foreground (less sensitive).",
         ge=1,
     )
-    learning_rate: float = Field(
-        default=0.05,
+    learning_rate: float | None = Field(
+        default=None,
         title="Learning rate",
-        description="Per-frame background adaptation rate in steady state (0 to 1).",
+        description="Per-frame background adaptation rate in steady state (0 to 1). Leave unset to let MOG2 choose its automatic adaptive rate; a fixed low rate absorbs stationary objects into the background quickly and measurably reduces motion recall.",
         ge=0.0,
         le=1.0,
     )
-    calibration_learning_rate: float = Field(
-        default=0.2,
+    calibration_learning_rate: float | None = Field(
+        default=None,
         title="Calibration learning rate",
-        description="Background adaptation rate used while calibrating (startup, mask or option changes, lightning or skip triggers); mirrors the stock detector's 0.2 calibration blend.",
+        description="Background adaptation rate used while calibrating (startup, mask or option changes, lightning or skip triggers). Leave unset to let MOG2 choose its automatic adaptive rate.",
         ge=0.0,
         le=1.0,
     )

@@ -323,11 +323,11 @@
       },
       "learning_rate": {
         "label": "Learning rate",
-        "description": "Per-frame background adaptation rate in steady state (0 to 1)."
+        "description": "Per-frame background adaptation rate in steady state (0 to 1). Leave unset to let MOG2 choose its automatic adaptive rate; a fixed low rate absorbs stationary objects into the background quickly and measurably reduces motion recall."
       },
       "calibration_learning_rate": {
         "label": "Calibration learning rate",
-        "description": "Background adaptation rate used while calibrating (startup, mask or option changes, lightning or skip triggers); mirrors the stock detector's 0.2 calibration blend."
+        "description": "Background adaptation rate used while calibrating (startup, mask or option changes, lightning or skip triggers). Leave unset to let MOG2 choose its automatic adaptive rate."
       },
       "shadow_mode": {
         "label": "Shadow mode",

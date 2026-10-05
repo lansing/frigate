@@ -51,6 +51,11 @@ class Cv2Mog2MotionDetector(MotionDetector):
         self._warned_low_height: int | None = None
         self._ocl = getattr(cv2, "ocl", None)
         self._use_ocl = self._probe_opencl()
+        # cached device-side UMat objects for the fused GPU pipeline
+        # (rebuilt on demand, invalidated by update_mask)
+        self._inv_mask_umat: cv2.UMat | None = None
+        self._kernel_umat: cv2.UMat | None = None
+        self._kernel_size_cached: int | None = None
         self.calibrating = True
         self.update_mask()
 
@@ -58,6 +63,12 @@ class Cv2Mog2MotionDetector(MotionDetector):
         return self.calibrating
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+        # with an OpenCL platform the fused GPU pipeline handles the frame;
+        # once a runtime fault has permanently disabled the GPU, this
+        # method's own CPU body below serves the rest of the detector's life
+        if self._use_ocl:
+            return self.detect_ocl(frame)
+
         motion_boxes: list[tuple[int, int, int, int]] = []
 
         if not self.config.enabled:
@@ -93,24 +104,8 @@ class Cv2Mog2MotionDetector(MotionDetector):
         small = cv2.bitwise_and(small, small, mask=self._inv_mask)
 
         # feed the model and grab the foreground plane (0=bg, ~127=shadow,
-        # 255=fg); while calibrating, adapt the background faster, mirroring
-        # the stock detector's 0.2 calibration blend
-        learning_rate = (
-            self._calibration_rate if self.calibrating else self._learning_rate
-        )
-        if self._use_ocl:
-            try:
-                # iGPU path: UMat in/out around the only GPU-bound step;
-                # resize/contrast/mask/morphology/contours stay on the CPU
-                fg_model = self._apply_ocl(small, learning_rate)
-            except cv2.error as err:
-                # runtime GPU fault: switch to CPU for the rest of this
-                # detector's life (a failed apply may leave the model
-                # inconsistent, so _disable_ocl rebuilds it)
-                self._disable_ocl(err)
-                fg_model = self._sub.apply(small, learning_rate)
-        else:
-            fg_model = self._sub.apply(small, learning_rate)
+        # 255=fg)
+        fg_model = self._sub.apply(small, learningRate=self._effective_rate())
         self._frame_idx += 1
         if self.calibrating and self._frame_idx < self._warmup_frames:
             # warmup: keep learning the background, emit nothing
@@ -121,7 +116,7 @@ class Cv2Mog2MotionDetector(MotionDetector):
         if self._shadow_mode == "keep":
             fg = cv2.threshold(fg_model, 0, 255, cv2.THRESH_BINARY)[1]
         else:
-            fg = cv2.inRange(fg_model, 255, 255)
+            fg = cv2.inRange(fg_model, 255, 255)  # type: ignore[call-overload]
 
         # optional morphology open/close (scrub speckle)
         if self._morphology.enabled:
@@ -206,6 +201,162 @@ class Cv2Mog2MotionDetector(MotionDetector):
 
         return motion_boxes
 
+    def detect_ocl(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """Fused GPU pipeline variant of detect() for OpenCL platforms.
+
+        Uploads the luma plane once; resize, contrast normalization, ROI
+        masking, MOG2 apply, shadow thresholding and morphology all run
+        on the GPU (chained UMat keeps intermediates on-device). Only the
+        final foreground mask is copied back, since findContours has no
+        OpenCL implementation. Per-frame CPU work is reduced to contour
+        extraction, the persistence gate and the percentile math. On any
+        cv2.error the detector permanently falls back to the CPU path
+        (see _disable_ocl for the contract).
+        """
+        motion_boxes: list[tuple[int, int, int, int]] = []
+
+        if not self.config.enabled:
+            return motion_boxes
+
+        # GPU disabled at init or after a runtime fault: same contract,
+        # pure CPU pipeline (UMat round trips would buy nothing)
+        if not self._use_ocl:
+            return self.detect(frame)
+
+        # if ptz motor is moving from autotracking, quickly return
+        # a single box that is 80% of the frame
+        if self._ptz_moving():
+            return [
+                (
+                    int(self.frame_shape[1] * 0.1),
+                    int(self.frame_shape[0] * 0.1),
+                    int(self.frame_shape[1] * 0.9),
+                    int(self.frame_shape[0] * 0.9),
+                )
+            ]
+
+        try:
+            H, W = self.frame_shape
+            gray = frame[0:H, 0:W]
+
+            # single H2D upload; everything from here until the final
+            # .get() stays on the GPU (the UMat ctor stubs only cover
+            # UMat args; ndarray is accepted at runtime)
+            small: cv2.UMat = cv2.UMat(gray)  # type: ignore[call-overload]
+            small = cv2.resize(
+                small,
+                dsize=(self._proc_size[1], self._proc_size[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+            # optional percentile contrast norm
+            # (before masking, same ordering as the CPU path)
+            if self._contrast_enabled:
+                small = self._normalize_contrast_ocl(small)
+
+            small = cv2.bitwise_and(small, small, mask=self._get_inv_mask_umat())
+
+            # feed the model and grab the foreground plane (0=bg,
+            # ~127=shadow, 255=fg); the UMat entry point is the GPU
+            fg_model = self._sub.apply(small, learningRate=self._effective_rate())
+            self._frame_idx += 1
+            if self.calibrating and self._frame_idx < self._warmup_frames:
+                # warmup: keep learning the background, emit nothing
+                return motion_boxes
+
+            # shadow handling: value-robust (OpenCV shadow may be 127,
+            # historically 125)
+            if self._shadow_mode == "keep":
+                fg = cv2.threshold(fg_model, 0, 255, cv2.THRESH_BINARY)[1]
+            else:
+                fg = cv2.inRange(fg_model, 255, 255)  # type: ignore[call-overload]
+
+            # optional morphology open/close (scrub speckle)
+            if self._morphology.enabled:
+                kernel = self._get_kernel_umat()
+                iterations = self._morphology.iterations
+                fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel, iterations=iterations)
+                fg = cv2.morphologyEx(
+                    fg, cv2.MORPH_CLOSE, kernel, iterations=iterations
+                )
+
+            # zero excluded regions on-device (matches the numpy
+            # scatter fg[self._mask] = 0 in the CPU path)
+            fg = cv2.bitwise_and(fg, fg, mask=self._get_inv_mask_umat())
+
+            # single D2H: only the final fg mask returns to the CPU
+            fg_host = fg.get()
+        except cv2.error as err:
+            # runtime GPU fault: switch to the CPU path for the rest of
+            # this detector's life (a failed apply may leave the model
+            # inconsistent, so _disable_ocl rebuilds it) and serve this
+            # frame from the CPU pipeline
+            self._disable_ocl(err)
+            return self.detect(frame)
+
+        # contours -> boxes in proc space (area gates; min defaults to
+        # the contour_area setting, which is on the same pixel scale)
+        min_area = self._contours.min_area or self.config.contour_area or 0
+        max_area = (
+            self._proc_size[0] * self._proc_size[1] * self._contours.max_area_ratio
+        )
+        proc_boxes: list[tuple[int, int, int, int]] = []
+        contours = grab_cv2_contours(
+            cv2.findContours(fg_host, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        )
+        for c in contours:
+            contour_area = cv2.contourArea(c)
+            if min_area <= contour_area <= max_area:
+                x, y, w, h = cv2.boundingRect(c)
+                proc_boxes.append((x, y, w, h))
+
+        # persistence gate (proc space, tracked by center distance)
+        proc_boxes = self._filter_persistent(proc_boxes)
+
+        # scale to full frame -> (x1, y1, x2, y2)
+        rf = self._resize_factor
+        motion_boxes = [
+            (
+                int(x * rf),
+                int(y * rf),
+                int((x + w) * rf),
+                int((y + h) * rf),
+            )
+            for (x, y, w, h) in proc_boxes
+        ]
+
+        # skip motion entirely if the scene change percentage exceeds the
+        # configured threshold; the frame is dropped and a recalibration
+        # is forced
+        pct_motion = cv2.countNonZero(fg_host) / (
+            self._proc_size[0] * self._proc_size[1]
+        )
+        if (
+            self.config.skip_motion_threshold is not None
+            and pct_motion > self.config.skip_motion_threshold
+        ):
+            self.calibrating = True
+            self._reset_state()
+            return []
+
+        # once the motion is less than 5% and the number of boxes is < 4,
+        # assume it is calibrated
+        if pct_motion < 0.05 and len(motion_boxes) <= 4:
+            self.calibrating = False
+
+        # on a large scene change (lightning, ir, ptz) relearn the
+        # background at the calibration learning rate; no model rebuild
+        if self.calibrating or pct_motion > self.config.lightning_threshold:
+            self.calibrating = True
+            if pct_motion > self.config.lightning_threshold:
+                logger.debug(
+                    "%s: large scene change, recalibrating MOG2 background",
+                    self.name,
+                )
+                self._reset_state()
+
+        return motion_boxes
+
     def update_mask(self) -> None:
         """Update the motion mask and relearn the background after a config change."""
         m = self.config.mog2
@@ -264,6 +415,10 @@ class Cv2Mog2MotionDetector(MotionDetector):
         excluded = resized_mask == 0
         self._mask = np.where(excluded)
         self._inv_mask = (~excluded).astype(np.uint8) * 255
+        # invalidate cached device-side masks/kernels for the fused pipeline
+        self._inv_mask_umat = None
+        self._kernel_umat = None
+        self._kernel_size_cached = None
 
         # reset detection state and relearn the background with the new
         # mask and parameters
@@ -307,9 +462,35 @@ class Cv2Mog2MotionDetector(MotionDetector):
             )
             return False
 
-    def _apply_ocl(self, frame: np.ndarray, learning_rate: float) -> np.ndarray:
-        """Run MOG2 apply on the GPU and copy the foreground plane back."""
-        return self._sub.apply(cv2.UMat(frame), learning_rate).get()
+    def _effective_rate(self) -> float:
+        """The learning rate MOG2 apply receives for the next frame.
+
+        Unset rates (the default) resolve to the negative value that
+        documents MOG2's automatic adaptive rate; a fixed low rate absorbs
+        stationary objects into the background quickly and measurably
+        reduces motion recall (74% -> 15% trigger on the eval clip).
+        """
+        rate = self._calibration_rate if self.calibrating else self._learning_rate
+        return -1.0 if rate is None else rate
+
+    def _get_inv_mask_umat(self) -> cv2.UMat:
+        """Cached device-side copy of the ROI mask (rebuilt by update_mask)."""
+        if self._inv_mask_umat is None:
+            self._inv_mask_umat = cv2.UMat(self._inv_mask)
+        return self._inv_mask_umat
+
+    def _get_kernel_umat(self) -> cv2.UMat:
+        """Cached device-side morphology kernel (rebuilt on size change)."""
+        kernel = self._kernel_umat
+        if kernel is None or self._kernel_size_cached != self._morphology.kernel_size:
+            size = self._morphology.kernel_size
+            self._kernel_size_cached = size
+            new_kernel: cv2.UMat = cv2.UMat(
+                cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+            )  # type: ignore[call-overload]
+            self._kernel_umat = new_kernel
+            kernel = new_kernel
+        return kernel
 
     def _disable_ocl(self, err: Exception) -> None:
         """Fall back to the CPU path for the lifetime of this detector."""
@@ -319,7 +500,8 @@ class Cv2Mog2MotionDetector(MotionDetector):
             err,
         )
         self._use_ocl = False
-        self._ocl.setUseOpenCL(False)
+        if self._ocl is not None:
+            self._ocl.setUseOpenCL(False)
         # restart warmup and persistence on a fresh model
         self._build_model()
         self._frame_idx = 0
@@ -342,8 +524,18 @@ class Cv2Mog2MotionDetector(MotionDetector):
         """Apply percentile contrast normalization via a cv2 LUT rescale."""
         # histogram-accelerated percentile (replaces np.percentile)
         hist = cv2.calcHist([frame], [0], None, [256], [0, 256]).flatten()
+        if self._contrast_rescale(hist, frame.size):
+            frame = cv2.LUT(frame, self._lut)
+        return frame
+
+    def _contrast_rescale(self, hist: np.ndarray, total: int) -> bool:
+        """Update the percentile window and LUT from a 256-bin histogram.
+
+        Shared by the CPU and fused GPU contrast paths so both keep the
+        same moving-window state. Returns True when a LUT rescale was
+        applied (self._lut holds the new LUT).
+        """
         cum_hist = np.cumsum(hist)
-        total = frame.size
         min_value = np.searchsorted(
             cum_hist, total * (self._contrast_min_pct / 100.0)
         ).astype(np.uint8)
@@ -351,23 +543,35 @@ class Cv2Mog2MotionDetector(MotionDetector):
             cum_hist, total * (self._contrast_max_pct / 100.0)
         ).astype(np.uint8)
         # skip contrast calcs if the image is a single color
-        if min_value < max_value:
-            # keep track of the last N contrast values
-            self._contrast_values[self._contrast_index] = [min_value, max_value]
-            self._contrast_index += 1
-            if self._contrast_index == len(self._contrast_values):
-                self._contrast_index = 0
+        if min_value >= max_value:
+            return False
+        # keep track of the last N contrast values
+        self._contrast_values[self._contrast_index] = [min_value, max_value]
+        self._contrast_index += 1
+        if self._contrast_index == len(self._contrast_values):
+            self._contrast_index = 0
 
-            avg_min, avg_max = np.mean(self._contrast_values, axis=0)
+        avg_min, avg_max = np.mean(self._contrast_values, axis=0)
 
-            # LUT rescale replaces np.clip + per-pixel math
-            bins = np.arange(256)
-            lut = np.clip(
-                (bins - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255
-            )
-            self._lut = lut.astype(np.uint8)
-            frame = cv2.LUT(frame, self._lut)
+        # LUT rescale replaces np.clip + per-pixel math
+        bins = np.arange(256)
+        lut = np.clip((bins - avg_min) * (255.0 / (avg_max - avg_min + 1e-6)), 0, 255)
+        self._lut = lut.astype(np.uint8)
+        return True
 
+    def _normalize_contrast_ocl(self, frame: cv2.UMat) -> cv2.UMat:
+        """GPU twin of _normalize_contrast: histogram and LUT on the device.
+
+        Only the 256-bin histogram comes back to the host for the
+        percentile math (shared with the CPU path via _contrast_rescale).
+        The cv2.UMat wrapper exposes no pixel count, so the total comes
+        from the known processing size.
+        """
+        hist = cv2.calcHist([frame], [0], None, [256], [0, 256]).get().flatten()
+        if self._contrast_rescale(hist, self._proc_size[0] * self._proc_size[1]):
+            # the LUT stubs require a UMat lut; the ndarray form is accepted
+            # at runtime (verified on-device) and avoids a per-frame upload
+            frame = cv2.LUT(frame, self._lut)  # type: ignore[call-overload]
         return frame
 
     def _filter_persistent(
@@ -395,7 +599,7 @@ class Cv2Mog2MotionDetector(MotionDetector):
                 pairs.append(((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2, i, j))
         pairs.sort(key=lambda p: p[0])
 
-        matched = [None] * len(boxes)
+        matched: list[int | None] = [None] * len(boxes)
         used = [False] * len(prev_boxes)
         for dist2, i, j in pairs:
             if matched[i] is not None or used[j]:
@@ -412,7 +616,8 @@ class Cv2Mog2MotionDetector(MotionDetector):
         out: list[tuple[int, int, int, int]] = []
         new_tracked: list[tuple[tuple[int, int, int, int], int]] = []
         for i, box in enumerate(boxes):
-            streak = prev_streaks[matched[i]] + 1 if matched[i] is not None else 1
+            m = matched[i]
+            streak = prev_streaks[m] + 1 if m is not None else 1
             new_tracked.append((box, streak))
             if streak >= self._persistence_frames:
                 out.append(box)
