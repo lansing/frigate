@@ -22,8 +22,7 @@ from frigate.const import (
     PROCESS_PRIORITY_HIGH,
     REQUEST_REGION_GRID,
 )
-from frigate.motion import MotionDetector
-from frigate.motion.improved_motion import ImprovedMotionDetector
+from frigate.motion import MotionDetector, create_motion_detector
 from frigate.object_detection.base import RemoteObjectDetector
 from frigate.ptz.autotrack import ptz_moving_at_frame_time
 from frigate.track import ObjectTracker
@@ -88,7 +87,7 @@ class CameraTracker(FrigateProcess):
         frame_queue = self.camera_metrics.frame_queue
         frame_shape = self.config.frame_shape
 
-        motion_detector = ImprovedMotionDetector(
+        motion_detector = create_motion_detector(
             frame_shape,
             self.config.motion,
             self.config.detect.fps,

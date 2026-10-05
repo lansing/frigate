@@ -114,7 +114,10 @@ if [[ "${TARGETARCH}" == "amd64" ]]; then
     apt-get -qq install -y -t trixie libmfx-gen1.2 libvpl2
     rm -f /etc/apt/sources.list.d/trixie.list
     apt-get -qq update
-    apt-get -qq install -y ocl-icd-libopencl1
+    # OpenCL: ICD loader + Intel iGPU runtime so the MOG2 motion detector
+    # can greedily accelerate on the iGPU when /dev/dri is passed to the
+    # container (falls back to CPU when no platform is available)
+    apt-get -qq install -y ocl-icd-libopencl1 intel-opencl-icd
 
     # install libtbb12 for NPU support
     apt-get -qq install -y libtbb12
