@@ -48,7 +48,6 @@ class ImprovedMotionDetector(MotionDetector):
         self.ptz_metrics = ptz_metrics
         self.last_stop_time: float | None = None
 
-        self.contrast_sum = 0
         self.lut = np.zeros((256,), dtype=np.uint8)
 
     def is_calibrating(self) -> bool:
@@ -102,34 +101,15 @@ class ImprovedMotionDetector(MotionDetector):
             # print(f"{min_value_old}->{min_value} {max_value_old}->{max_value}")
             if min_value < max_value:
                 # keep track of the last 50 contrast values
-                # self.contrast_values[self.contrast_values_index] = [
-                #     min_value,
-                #     max_value,
-                # ]
-                # self.contrast_values_index += 1
-                # if self.contrast_values_index == len(self.contrast_values):
-                #     self.contrast_values_index = 0
+                self.contrast_values[self.contrast_values_index] = [
+                    min_value,
+                    max_value,
+                ]
+                self.contrast_values_index += 1
+                if self.contrast_values_index == len(self.contrast_values):
+                    self.contrast_values_index = 0
 
-                # avg_min, avg_max = np.mean(self.contrast_values, axis=0)
-
-                # TODO go back to the original implementation (above, from keep track of the last 50 contrast values, until here)
-                # 1. Subtract the old value before overwriting it
-                old_val = self.contrast_values[self.contrast_values_index]
-                self.contrast_sum -= old_val
-
-                # 2. Add the new value and store it
-                new_val = np.array([min_value, max_value])
-                self.contrast_values[self.contrast_values_index] = new_val
-                self.contrast_sum += new_val
-
-                # 3. Increment index (as you already do)
-                self.contrast_values_index = (self.contrast_values_index + 1) % len(
-                    self.contrast_values
-                )
-
-                # 4. Average is now a simple division, no iteration required
-                avg_min, avg_max = self.contrast_sum / 50.0
-                # TODO end the new contrast sum implementation that we want to abandon
+                avg_min, avg_max = np.mean(self.contrast_values, axis=0)
 
                 # resized_frame = np.clip(resized_frame, avg_min, avg_max)
                 # resized_frame = (
