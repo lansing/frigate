@@ -559,6 +559,78 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         self.assertIsNotNone(self.detector._inv_mask_umat)
         self.assertEqual(self.detector._kernel_umat.get().shape[:2], (5, 5))
 
+    def test_use_bgr_builds_color_input(self):
+        """use_bgr converts the I420 frame to 3-channel BGR (real color);
+        the default feeds the 2-D luma plane, and the flag hot-reloads via
+        update_mask."""
+        i420 = np.full((150, 100), 128, np.uint8)
+        i420[100:150, :] = 80  # offset chroma (rows below the Y plane)
+
+        self.assertEqual(self.detector._build_input(i420).shape, (100, 100))
+
+        self.config.mog2.use_bgr = True
+        self.detector.update_mask()
+        bgr = self.detector._build_input(i420)
+        self.assertEqual(bgr.shape, (100, 100, 3))
+        self.assertFalse(
+            (bgr[..., 0] == bgr[..., 1]).all(),
+            "expected color (non-gray) output from the offset chroma",
+        )
+
+    def test_use_bgr_detects_motion(self):
+        """The 3-channel BGR pipeline detects a moving object end to end."""
+        self.config.mog2.use_bgr = True
+        det = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
+
+        def i420_frame() -> np.ndarray:
+            return np.full((150, 100), 128, np.uint8)
+
+        for _ in range(60):
+            det.detect(i420_frame())
+        self.assertFalse(det.is_calibrating())
+        boxes = []
+        for step in range(6):
+            frame = i420_frame()
+            x = 10 + step * 5
+            frame[45:55, x : x + 10] = 255
+            boxes = det.detect(frame)
+        self.assertTrue(boxes, "expected motion boxes from the BGR pipeline")
+
+    def test_use_bgr_skips_contrast_norm(self):
+        """BGR mode skips the luma percentile contrast step; luma mode runs
+        it (the step is tuned for the single-channel luma plane)."""
+
+        # non-uniform frames so the contrast step has work to do in either
+        # mode (a single-color frame would short-circuit inside it)
+        def var_luma() -> np.ndarray:
+            f = np.full((100, 100), 128, np.uint8)
+            f[10:40, 10:40] = 60
+            f[60:90, 60:90] = 190
+            return f
+
+        def var_i420() -> np.ndarray:
+            f = np.full((150, 100), 128, np.uint8)
+            f[10:40, 10:40] = 60
+            f[60:90, 60:90] = 190
+            return f
+
+        # control: the luma pipeline invokes the contrast step
+        luma = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
+        luma_calls: list[np.ndarray] = []
+        luma._normalize_contrast = lambda small: (luma_calls.append(small), small)[1]
+        for _ in range(5):
+            luma.detect(var_luma())
+        self.assertGreater(len(luma_calls), 0, "expected contrast to run in luma mode")
+
+        # BGR mode: the contrast step is skipped entirely
+        self.config.mog2.use_bgr = True
+        bgr = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
+        bgr_calls: list[np.ndarray] = []
+        bgr._normalize_contrast = lambda small: (bgr_calls.append(small), small)[1]
+        for _ in range(5):
+            bgr.detect(var_i420())
+        self.assertEqual(bgr_calls, [], "expected contrast to be skipped in BGR mode")
+
 
 if __name__ == "__main__":
     unittest.main()

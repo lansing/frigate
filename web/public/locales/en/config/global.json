@@ -824,6 +824,10 @@
         "label": "Shadow mode",
         "description": "Whether MOG2 shadow pixels count as foreground (keep) or are treated as background (background)."
       },
+      "use_bgr": {
+        "label": "Use BGR input",
+        "description": "Convert the YUV420p (I420) frame to BGR and feed 3-channel color to MOG2 instead of the grayscale luma plane. Luma (default) is cheaper and cleaner on dappled shadows; BGR enables color-aware modeling but adds ~2x dappled false positives."
+      },
       "contrast_norm": {
         "label": "Contrast normalization",
         "description": "Apply percentile contrast normalization before analysis to stabilize detection across lighting changes."

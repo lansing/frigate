@@ -62,6 +62,20 @@ class Cv2Mog2MotionDetector(MotionDetector):
     def is_calibrating(self) -> bool:
         return self.calibrating
 
+    def _build_input(self, frame: np.ndarray) -> np.ndarray:
+        """Build the full-resolution MOG2 input from the I420 frame.
+
+        Frigate hands detect() a YUV420p (I420) buffer: a single 2-D uint8
+        array of shape (H*3//2, W) with the Y plane stacked over the U/V
+        planes. The Y-plane slice already is grayscale (no cvtColor needed);
+        when use_bgr is set the whole I420 frame is converted to BGR so MOG2
+        models 3-channel color instead of luma.
+        """
+        if self._use_bgr:
+            return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+        H, W = self.frame_shape
+        return frame[0:H, 0:W]
+
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         # with an OpenCL platform the fused GPU pipeline handles the frame;
         # once a runtime fault has permanently disabled the GPU, this
@@ -86,19 +100,19 @@ class Cv2Mog2MotionDetector(MotionDetector):
                 )
             ]
 
-        H, W = self.frame_shape
-        gray = frame[0:H, 0:W]
-
         small = cv2.resize(
-            gray,
+            self._build_input(frame),
             dsize=(self._proc_size[1], self._proc_size[0]),
             interpolation=cv2.INTER_NEAREST,
         )
 
         # optional percentile contrast norm
         # this has to come before masking so excluded pixels (0) cannot
-        # drag the min percentile toward 0 (matches the stock ordering)
-        if self._contrast_enabled:
+        # drag the min percentile toward 0 (matches the stock ordering).
+        # Skipped while use_bgr is set: the percentile window and LUT are
+        # tuned for the single-channel luma plane, so they are not applied
+        # to 3-channel color input for now
+        if self._contrast_enabled and not self._use_bgr:
             small = self._normalize_contrast(small)
 
         small = cv2.bitwise_and(small, small, mask=self._inv_mask)
@@ -204,7 +218,8 @@ class Cv2Mog2MotionDetector(MotionDetector):
     def detect_ocl(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Fused GPU pipeline variant of detect() for OpenCL platforms.
 
-        Uploads the luma plane once; resize, contrast normalization, ROI
+        Uploads the input (luma plane, or the I420 -> BGR conversion when
+        use_bgr is set) once; resize, contrast normalization, ROI
         masking, MOG2 apply, shadow thresholding and morphology all run
         on the GPU (chained UMat keeps intermediates on-device). Only the
         final foreground mask is copied back, since findContours has no
@@ -236,13 +251,12 @@ class Cv2Mog2MotionDetector(MotionDetector):
             ]
 
         try:
-            H, W = self.frame_shape
-            gray = frame[0:H, 0:W]
-
-            # single H2D upload; everything from here until the final
+            # single H2D upload (luma plane, or the I420 -> BGR conversion
+            # when use_bgr is set); everything from here until the final
             # .get() stays on the GPU (the UMat ctor stubs only cover
             # UMat args; ndarray is accepted at runtime)
-            small: cv2.UMat = cv2.UMat(gray)  # type: ignore[call-overload]
+            input_frame = self._build_input(frame)
+            small: cv2.UMat = cv2.UMat(input_frame)  # type: ignore[call-overload]
             small = cv2.resize(
                 small,
                 dsize=(self._proc_size[1], self._proc_size[0]),
@@ -250,8 +264,9 @@ class Cv2Mog2MotionDetector(MotionDetector):
             )
 
             # optional percentile contrast norm
-            # (before masking, same ordering as the CPU path)
-            if self._contrast_enabled:
+            # (before masking, same ordering as the CPU path, which skips
+            # it while use_bgr is set)
+            if self._contrast_enabled and not self._use_bgr:
                 small = self._normalize_contrast_ocl(small)
 
             small = cv2.bitwise_and(small, small, mask=self._get_inv_mask_umat())
@@ -367,6 +382,7 @@ class Cv2Mog2MotionDetector(MotionDetector):
         self._learning_rate = m.learning_rate
         self._calibration_rate = m.calibration_learning_rate
         self._shadow_mode = m.shadow_mode
+        self._use_bgr = m.use_bgr
         self._contrast_enabled = m.contrast_norm
         self._contrast_history = m.contrast_history
         self._contrast_min_pct = m.contrast_min_pct
