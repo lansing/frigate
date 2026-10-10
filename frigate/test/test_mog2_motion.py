@@ -389,8 +389,8 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
             det = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
         self.assertTrue(det._use_ocl)
 
-        # the fused chain builds its cached device-side mask; the plain CPU
-        # body of detect() never would, so this proves the dispatch happened
+        # the fused chain builds its cached device-side mask; the CPU body
+        # of detect() never would, so this proves the UMat path ran
         det.detect(self._static_frame())
         self.assertIsNotNone(
             det._inv_mask_umat, "expected detect() to run the fused UMat pipeline"
@@ -406,69 +406,11 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
             boxes = det.detect(frame)
         self.assertTrue(boxes)
 
-    def test_opencl_falls_back_to_cpu_on_apply_error(self):
-        """A runtime OpenCL fault in the fused pipeline switches the detector
-        to CPU permanently (the model rebuild inside the fallback replaces
-        _sub, so later frames run on a clean CPU model)."""
-        with mock.patch.object(cv2.ocl, "haveOpenCL", return_value=True):
-            det = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
-        self.assertTrue(det._use_ocl)
-
-        real_apply = cv2.BackgroundSubtractorMOG2.apply
-        state = {"failed": False}
-
-        def flaky_apply(self, *args, **kwargs):
-            if not state["failed"]:
-                state["failed"] = True
-                raise cv2.error("simulated OpenCL failure")
-            return real_apply(self, *args, **kwargs)
-
-        with (
-            mock.patch.object(cv2.BackgroundSubtractorMOG2, "apply", flaky_apply),
-            self.assertLogs("frigate.motion.cv2_mog2_motion", level="WARNING") as cm,
-        ):
-            # the fused apply hits the fault; the CPU fallback apply for the
-            # same frame delegates to the real method (state already raised)
-            det.detect(self._static_frame())
-        self.assertTrue(
-            any("falling back to CPU" in message for message in cm.output),
-            "expected the CPU fallback warning",
-        )
-        self.assertFalse(det._use_ocl)
-
-        # the faulted frame's model is rebuilt and re-warmed: feed static
-        # frames to recalibrate, then the CPU path must detect motion
-        self._calibrate(detector=det)
-        boxes = []
-        for step in range(17):
-            frame = self._static_frame()
-            x = 5 + step * 5
-            frame[45:55, x : x + 10] = 255
-            boxes = det.detect(frame)
-            if boxes:
-                break
-        self.assertTrue(boxes, "expected the CPU fallback path to detect motion")
-
-    def test_detect_dispatches_to_fused_pipeline(self):
-        """detect() hands the frame to detect_ocl() at the top while the GPU
-        is enabled, and runs its own CPU body once it is disabled."""
-        with mock.patch.object(cv2.ocl, "haveOpenCL", return_value=True):
-            det = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
-        self.assertTrue(det._use_ocl)
-
-        sentinel = [(1, 2, 3, 4)]
-        det.detect_ocl = lambda frame: sentinel
-        self.assertIs(det.detect(self._static_frame()), sentinel)
-
-        det._use_ocl = False
-        det.detect_ocl = lambda frame: sentinel
-        self.assertIsNot(det.detect(self._static_frame()), sentinel)
-
-    def test_detect_ocl_matches_detect(self):
-        """The fused GPU pipeline emits exactly the same boxes as the CPU
-        pipeline for an identical frame sequence (the UMat ops used by the
-        fused path are bit-exact, and the MOG2 GPU output was verified
-        identical to the CPU output)."""
+    def test_umat_pipeline_matches_cpu_pipeline(self):
+        """The fused pipeline emits exactly the same boxes as the CPU pipeline
+        for an identical frame sequence (the UMat ops used by the fused path
+        are bit-exact, and the MOG2 GPU output was verified identical to the
+        CPU output)."""
         det_cpu = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
         det_ocl = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
         # force the fused chain so it runs even where no OpenCL platform
@@ -483,12 +425,12 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
                 x = 5 + (step - 40) * 5
                 frame[45:55, x : x + 10] = 255
             results_cpu.append(det_cpu.detect(frame))
-            results_ocl.append(det_ocl.detect_ocl(frame))
+            results_ocl.append(det_ocl.detect(frame))
 
         self.assertEqual(results_cpu, results_ocl)
         self.assertTrue(any(results_cpu), "expected motion boxes for the object")
 
-    def test_detect_ocl_use_bgr_fused_color_pipeline(self):
+    def test_umat_bgr_fused_color_pipeline(self):
         """In use_bgr mode the fused path uploads the raw I420 buffer and
         converts to BGR on-device (UMat cvtColor); the result matches the
         CPU BGR pipeline for an identical frame sequence."""
@@ -510,81 +452,33 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
                 x = 5 + (step - 40) * 5
                 frame[45:55, x : x + 10] = 255
             results_cpu.append(det_cpu.detect(frame))
-            results_ocl.append(det_ocl.detect_ocl(frame))
+            results_ocl.append(det_ocl.detect(frame))
 
         self.assertTrue(any(results_cpu), "expected motion boxes from the BGR pipeline")
         self.assertEqual(results_cpu, results_ocl)
 
-    def test_detect_ocl_falls_back_on_gpu_error(self):
-        """A runtime OpenCL fault in the fused pipeline switches the
-        detector to the CPU path permanently and serves the frame."""
-        with mock.patch.object(cv2.ocl, "haveOpenCL", return_value=True):
-            det = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
-        self.assertTrue(det._use_ocl)
-
-        # calibrate through the fused pipeline first
-        for _ in range(60):
-            det.detect_ocl(self._static_frame())
-        self.assertFalse(det.is_calibrating())
-
-        state = {"failed": False}
-
-        def flaky_mask_umat():
-            if not state["failed"]:
-                state["failed"] = True
-                raise cv2.error("simulated OpenCL failure")
-            return cv2.UMat(det._inv_mask)
-
-        det._get_inv_mask_umat = flaky_mask_umat
-
-        with self.assertLogs("frigate.motion.cv2_mog2_motion", level="WARNING") as cm:
-            frame = self._static_frame()
-            frame[45:55, 20:30] = 255
-            det.detect_ocl(frame)
-        self.assertTrue(
-            any("falling back to CPU" in message for message in cm.output),
-            "expected the CPU fallback warning",
-        )
-        self.assertFalse(det._use_ocl)
-
-        # the faulted frame's model is rebuilt and re-warmed: feed static
-        # frames to recalibrate (via the fused path, now CPU-backed). Then
-        # a moving object must be detected (a static one at the fault
-        # location was learned into the background by the faulted frame's
-        # own fallback apply)
-        for _ in range(60):
-            det.detect_ocl(self._static_frame())
-        self.assertFalse(det.is_calibrating())
-        boxes = []
-        for step in range(6):
-            frame = self._static_frame()
-            x = 10 + step * 5
-            frame[45:55, x : x + 10] = 255
-            boxes = det.detect_ocl(frame)
-        self.assertTrue(boxes, "expected motion boxes after the GPU fallback")
-
-    def test_detect_ocl_umat_caches_invalidate_on_update_mask(self):
+    def test_umat_caches_invalidate_on_update_mask(self):
         """update_mask drops the cached device-side mask and kernel, and the
         kernel cache rebuilds at the new size."""
         self._calibrate()
         # force the fused chain so it runs even where no OpenCL platform
         # exists (UMat ops then execute CPU-backed)
         self.detector._use_ocl = True
-        self.detector.detect_ocl(self._static_frame())
+        self.detector.detect(self._static_frame())
         self.assertIsNotNone(self.detector._inv_mask_umat)
-        self.assertIsNotNone(self.detector._kernel_umat)
+        self.assertIsNotNone(self.detector._kernel)
 
         self.config.mog2.morphology.kernel_size = 5
         self.detector.update_mask()
         self.assertIsNone(self.detector._inv_mask_umat)
-        self.assertIsNone(self.detector._kernel_umat)
+        self.assertIsNone(self.detector._kernel)
 
         # feed past the warmup window so the full pipeline (and the kernel
         # cache build) actually runs
         for _ in range(60):
-            self.detector.detect_ocl(self._static_frame())
+            self.detector.detect(self._static_frame())
         self.assertIsNotNone(self.detector._inv_mask_umat)
-        self.assertEqual(self.detector._kernel_umat.get().shape[:2], (5, 5))
+        self.assertEqual(self.detector._kernel.get().shape[:2], (5, 5))
 
     def test_use_bgr_builds_color_input(self):
         """use_bgr converts the I420 frame to 3-channel BGR (real color);
