@@ -45,14 +45,13 @@ class Cv2Mog2MotionDetector(MotionDetector):
         self.config = config
         self.frame_shape = frame_shape
         self.ptz_metrics = ptz_metrics
-        self._lut = np.zeros(256, np.uint8)
-        self._prev_boxes: list[tuple[tuple[int, int, int, int], int]] = []
+        self._lut = np.zeros(256, np.uint8)  # TODO delete me
+        self._prev_boxes: list[tuple[tuple[int, int, int, int], int]] = []  # TODO delete me
         self._frame_idx = 0
-        self._warned_low_height: int | None = None
+        self._warned_low_height: int | None = None  # TODO delete me
         self._ocl = getattr(cv2, "ocl", None)
         self._use_ocl = self._probe_opencl()
         # cached device-side UMat objects for the fused GPU pipeline
-        # (rebuilt on demand, invalidated by update_mask)
         self._inv_mask_umat: cv2.UMat | None = None
         self._kernel_umat: cv2.UMat | None = None
         self._kernel_size_cached: int | None = None
@@ -75,6 +74,20 @@ class Cv2Mog2MotionDetector(MotionDetector):
             return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
         H, W = self.frame_shape
         return frame[0:H, 0:W]
+
+    def detect_new(self, frame: np.ndarray): -> list[tuple[int, int, int, int]]:
+        # WIP cleanup version
+        # fast return if ptz_moving
+
+        # umat version just sends frame to umat + uses umat inv_mask, kernel
+        # downsample
+        # mask
+        # run model
+        # morphology (TODO do we keep this?)
+        # get contours
+        # handle skip_motion_threshold / lightning threshold
+
+
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         # with an OpenCL platform the fused GPU pipeline handles the frame;
@@ -218,12 +231,13 @@ class Cv2Mog2MotionDetector(MotionDetector):
     def detect_ocl(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Fused GPU pipeline variant of detect() for OpenCL platforms.
 
-        Uploads the input (luma plane, or the I420 -> BGR conversion when
-        use_bgr is set) once; resize, contrast normalization, ROI
-        masking, MOG2 apply, shadow thresholding and morphology all run
-        on the GPU (chained UMat keeps intermediates on-device). Only the
-        final foreground mask is copied back, since findContours has no
-        OpenCL implementation. Per-frame CPU work is reduced to contour
+        Uploads the input once (the luma plane, or the raw I420 buffer when
+        use_bgr is set, in which case the I420 -> BGR conversion also runs
+        on-device); resize, contrast normalization, ROI masking, MOG2
+        apply, shadow thresholding and morphology all run on the GPU
+        (chained UMat keeps intermediates on-device). Only the final
+        foreground mask is copied back, since findContours has no OpenCL
+        implementation. Per-frame CPU work is reduced to contour
         extraction, the persistence gate and the percentile math. On any
         cv2.error the detector permanently falls back to the CPU path
         (see _disable_ocl for the contract).
@@ -251,12 +265,22 @@ class Cv2Mog2MotionDetector(MotionDetector):
             ]
 
         try:
-            # single H2D upload (luma plane, or the I420 -> BGR conversion
-            # when use_bgr is set); everything from here until the final
+            # single H2D upload; everything from here until the final
             # .get() stays on the GPU (the UMat ctor stubs only cover
             # UMat args; ndarray is accepted at runtime)
-            input_frame = self._build_input(frame)
-            small: cv2.UMat = cv2.UMat(input_frame)  # type: ignore[call-overload]
+            if self._use_bgr:
+                # use_bgr: upload the raw I420 buffer and run the
+                # I420 -> BGR conversion on-device (a UMat input is what
+                # routes cvtColor through its OpenCL path), so the
+                # 3-channel frame never round-trips to the host. The
+                # OCL flag is always set before any UMat exists (init
+                # probe), which the driver requires for the on-device
+                # buffer handoff
+                small: cv2.UMat = cv2.UMat(frame)  # type: ignore[call-overload]
+                small = cv2.cvtColor(small, cv2.COLOR_YUV2BGR_I420)
+            else:
+                H, W = self.frame_shape
+                small = cv2.UMat(frame[0:H, 0:W])  # type: ignore[call-overload]
             small = cv2.resize(
                 small,
                 dsize=(self._proc_size[1], self._proc_size[0]),

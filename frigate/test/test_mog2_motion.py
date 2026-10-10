@@ -488,6 +488,33 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         self.assertEqual(results_cpu, results_ocl)
         self.assertTrue(any(results_cpu), "expected motion boxes for the object")
 
+    def test_detect_ocl_use_bgr_fused_color_pipeline(self):
+        """In use_bgr mode the fused path uploads the raw I420 buffer and
+        converts to BGR on-device (UMat cvtColor); the result matches the
+        CPU BGR pipeline for an identical frame sequence."""
+        self.config.mog2.use_bgr = True
+        det_cpu = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
+        det_ocl = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
+        # force the fused chain so it runs even where no OpenCL platform
+        # exists (UMat ops then execute CPU-backed and bit-exact)
+        det_ocl._use_ocl = True
+
+        def i420_frame() -> np.ndarray:
+            return np.full((150, 100), 128, np.uint8)
+
+        results_cpu: list[tuple[int, int, int, int]] = []
+        results_ocl: list[tuple[int, int, int, int]] = []
+        for step in range(90):
+            frame = i420_frame()
+            if step >= 40:
+                x = 5 + (step - 40) * 5
+                frame[45:55, x : x + 10] = 255
+            results_cpu.append(det_cpu.detect(frame))
+            results_ocl.append(det_ocl.detect_ocl(frame))
+
+        self.assertTrue(any(results_cpu), "expected motion boxes from the BGR pipeline")
+        self.assertEqual(results_cpu, results_ocl)
+
     def test_detect_ocl_falls_back_on_gpu_error(self):
         """A runtime OpenCL fault in the fused pipeline switches the
         detector to the CPU path permanently and serves the frame."""
