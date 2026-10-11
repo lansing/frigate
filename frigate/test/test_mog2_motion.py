@@ -5,7 +5,11 @@ from unittest import mock
 import cv2
 import numpy as np
 
-from frigate.config.camera.motion import Mog2ContoursConfig, MotionConfig
+from frigate.config.camera.motion import (
+    Mog2MotionConfig,
+    Mog2MorphologyConfig,
+    MotionConfig,
+)
 from frigate.motion import create_motion_detector
 from frigate.motion.cv2_mog2_motion import Cv2Mog2MotionDetector
 from frigate.motion.improved_motion import ImprovedMotionDetector
@@ -36,9 +40,6 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
     def setUp(self):
         self.frame_shape = (100, 100)
         self.config = make_config(self.frame_shape)
-        # the default min_area (160) is tuned for the 360 processing height;
-        # the 100x100 test frames need a smaller gate for their small objects
-        self.config.mog2.contours.min_area = 10
         self.detector = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
 
     def tearDown(self):
@@ -88,19 +89,21 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
     def test_moving_object_emitted_after_persistence(self):
         """A moving object is tracked, delayed by the persistence gate, and
         continuous once established."""
-        self._calibrate()
+        config = make_config(self.frame_shape)
+        config.mog2.persistence_frames = 2
+        detector = Cv2Mog2MotionDetector(self.frame_shape, config, fps=30)
+        self._calibrate(detector=detector)
 
         boxes_by_frame = []
         for step in range(17):
             frame = self._static_frame()
             x = 5 + step * 5
             frame[45:55, x : x + 10] = 255
-            boxes_by_frame.append(self.detector.detect(frame))
+            boxes_by_frame.append(detector.detect(frame))
 
         first = next((i for i, boxes in enumerate(boxes_by_frame) if boxes), None)
         self.assertIsNotNone(first, "expected motion boxes for the moving object")
-        # default persistence_frames=2: the box cannot appear on the first
-        # motion frame
+        # persistence_frames=2: the box cannot appear on the first motion frame
         self.assertGreaterEqual(first, 1)
         self.assertLessEqual(first, 3)
 
@@ -133,8 +136,8 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         persistence gate, while with the gate disabled it triggers."""
         config_off = make_config(self.frame_shape)
         config_off.mog2.persistence_frames = 0
-        config_off.mog2.contours.min_area = 10
         det_off = Cv2Mog2MotionDetector(self.frame_shape, config_off, fps=30)
+        self.config.mog2.persistence_frames = 2
         det_on = Cv2Mog2MotionDetector(self.frame_shape, self.config, fps=30)
 
         static = self._static_frame()
@@ -166,7 +169,7 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         for mode, expect_box in (("keep", True), ("background", False)):
             with self.subTest(shadow_mode=mode):
                 config = make_config(self.frame_shape)
-                config.mog2.contrast_norm = False
+                config.improve_contrast = False
                 config.mog2.shadow_mode = mode
                 det = Cv2Mog2MotionDetector(self.frame_shape, config, fps=30)
 
@@ -175,8 +178,8 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
                     det.detect(static)
 
                 boxes = []
-                # feed the scene a few frames so the persistence gate
-                # (default 2) can pass the static patch through
+                # feed the scene a few frames so the shadow patch survives the
+                # pipeline (the persistence gate is off by default)
                 for _ in range(4):
                     boxes = det.detect(shadow_scene())
 
@@ -194,23 +197,26 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
     def test_lightning_recalibrates_without_rebuild(self):
         """A frame exceeding lightning_threshold recalibrates (warmup
         restarts) without rebuilding the MOG2 model."""
-        self._calibrate()
-        model_before = self.detector._sub
+        config = make_config(self.frame_shape)
+        config.mog2.warmup_frames = 10
+        detector = Cv2Mog2MotionDetector(self.frame_shape, config, fps=30)
+        self._calibrate(detector=detector)
+        model_before = detector._sub
 
         lightning = self._static_frame()
         lightning[:90] = 200
-        self.detector.detect(lightning)
+        detector.detect(lightning)
 
-        self.assertTrue(self.detector.is_calibrating())
+        self.assertTrue(detector.is_calibrating())
         self.assertIs(
-            self.detector._sub,
+            detector._sub,
             model_before,
             "the MOG2 model must not be rebuilt on a lightning trigger",
         )
 
-        for _ in range(self.config.mog2.warmup_frames):
+        for _ in range(config.mog2.warmup_frames):
             self.assertEqual(
-                self.detector.detect(self._static_frame()),
+                detector.detect(self._static_frame()),
                 [],
                 "warmup frames after a lightning trigger must emit nothing",
             )
@@ -220,7 +226,6 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         the model and resets state; stop() is safe."""
         config = make_config(self.frame_shape)
         config.mog2.persistence_frames = 0
-        config.mog2.contours.min_area = 10
         det = Cv2Mog2MotionDetector(self.frame_shape, config, fps=30)
         static = self._static_frame()
         for _ in range(60):
@@ -253,8 +258,6 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         produce identical results."""
         config_2d = make_config(self.frame_shape)
         config_3d = make_config(self.frame_shape)
-        config_2d.mog2.contours.min_area = 10
-        config_3d.mog2.contours.min_area = 10
         det_2d = Cv2Mog2MotionDetector(self.frame_shape, config_2d, fps=30)
         det_3d = Cv2Mog2MotionDetector(self.frame_shape, config_3d, fps=30)
 
@@ -276,8 +279,7 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         """Boxes are full-frame (x1, y1, x2, y2) within the frame bounds and
         scaled by the resize factor."""
         config = make_config(self.frame_shape)
-        config.mog2.frame_height = 50
-        config.mog2.contours.min_area = 10
+        config.frame_height = 50
         det = Cv2Mog2MotionDetector(self.frame_shape, config, fps=30)
         static = self._static_frame()
         for _ in range(60):
@@ -307,44 +309,38 @@ class TestCv2Mog2MotionDetector(unittest.TestCase):
         self.assertAlmostEqual(center_x, 30, delta=6)
         self.assertAlmostEqual(center_y, 30, delta=6)
 
-    def test_mog2_default_processing_height(self):
-        """Without an explicit mog2.frame_height the detector uses the tuned
-        default 360, capped at the native resolution for small cameras."""
+    def test_mog2_uses_shared_frame_height(self):
+        """The shared motion frame_height sets the processing size, and unset
+        means the full frame, matching the stock detector."""
         config = make_config((1080, 1920))
+        self.assertEqual(config.frame_height, 100)
         det = Cv2Mog2MotionDetector((1080, 1920), config, fps=30)
-        self.assertEqual(det._proc_size, (360, 640))
-        self.assertEqual(det._resize_factor, 3.0)
+        self.assertEqual(det._proc_size, (100, 178))
+        self.assertAlmostEqual(det._resize_factor, 10.8)
 
-        small_config = make_config((180, 320))
-        small_det = Cv2Mog2MotionDetector((180, 320), small_config, fps=30)
-        self.assertEqual(small_det._proc_size, (180, 320))
+        full_config = make_config((180, 320))
+        full_config.frame_height = None
+        full_det = Cv2Mog2MotionDetector((180, 320), full_config, fps=30)
+        self.assertEqual(full_det._proc_size, (180, 320))
+        self.assertAlmostEqual(full_det._resize_factor, 1.0)
 
     def test_mog2_explicit_frame_height(self):
-        """An explicit mog2.frame_height is honored."""
+        """An explicit shared frame_height is honored."""
         config = make_config((1080, 1920))
-        config.mog2.frame_height = 540
+        config.frame_height = 540
         det = Cv2Mog2MotionDetector((1080, 1920), config, fps=30)
         self.assertEqual(det._proc_size, (540, 960))
         self.assertAlmostEqual(det._resize_factor, 2.0)
 
-    def test_mog2_warns_on_low_frame_height(self):
-        """An explicit processing height below the recommended minimum logs a
-        warning (once per distinct value)."""
-        config = make_config((1080, 1920))
-        config.mog2.frame_height = 100
-        with self.assertLogs("frigate.motion.cv2_mog2_motion", level="WARNING") as cm:
-            det = Cv2Mog2MotionDetector((1080, 1920), config, fps=30)
-            # a rebuild with the same low height must not warn again
-            det.update_mask()
-        self.assertTrue(
-            any("below the recommended" in message for message in cm.output)
-        )
-        self.assertEqual(len(cm.output), 1)
-        self.assertEqual(det._proc_size, (100, 178))
-
-    def test_mog2_min_area_default(self):
-        """The tuned min_area default is 160 (at the 360 processing height)."""
-        self.assertEqual(Mog2ContoursConfig().min_area, 160)
+    def test_mog2_defaults_match_the_stock_detector(self):
+        """The collapsed and new defaults are the legacy behavior: no warmup,
+        no temporal gate, no upper area gate, and the shared contour gate."""
+        self.assertEqual(MotionConfig().frame_height, 100)
+        self.assertEqual(MotionConfig().contour_area, 10)
+        self.assertEqual(Mog2MotionConfig().warmup_frames, 0)
+        self.assertEqual(Mog2MotionConfig().persistence_frames, 0)
+        self.assertEqual(Mog2MotionConfig().max_area_ratio, 1.0)
+        self.assertEqual(Mog2MorphologyConfig().iterations, 1)
 
     def test_factory_selects_detector(self):
         """The factory returns the selected detector class and the improved

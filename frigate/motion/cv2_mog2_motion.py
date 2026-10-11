@@ -22,11 +22,6 @@ class Cv2Mog2MotionDetector(MotionDetector):
     Boxes are full-frame (x1, y1, x2, y2). The same steps run on host arrays or UMat.
     """
 
-    # MOG2 needs more detail than the default frame height gives
-    _DEFAULT_FRAME_HEIGHT = 360
-    # below this, MOG2 misses detail
-    _MIN_RECOMMENDED_FRAME_HEIGHT = 200
-
     def __init__(
         self,
         frame_shape: tuple[int, int],
@@ -42,7 +37,6 @@ class Cv2Mog2MotionDetector(MotionDetector):
         self._lut = np.zeros(256, np.uint8)  # TODO delete me
         self._prev_boxes: list[tuple[tuple[int, int, int, int], int]] = []  # TODO delete me
         self._frame_idx = 0
-        self._warned_low_height: int | None = None  # TODO delete me
         self._use_ocl = self._probe_opencl()
         # cached ROI mask and morphology kernel (device copies when OpenCL runs)
         self._inv_mask_umat: cv2.UMat | None = None
@@ -144,10 +138,8 @@ class Cv2Mog2MotionDetector(MotionDetector):
     def _evaluate_foreground(self, fg: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Turn a host foreground mask into boxes and update calibration state."""
         # area gates are in processing pixels
-        min_area = self._contours.min_area or self.config.contour_area or 0
-        max_area = (
-            self._proc_size[0] * self._proc_size[1] * self._contours.max_area_ratio
-        )
+        min_area = self._min_area
+        max_area = self._proc_size[0] * self._proc_size[1] * self._max_area_ratio
         proc_boxes: list[tuple[int, int, int, int]] = []
         for c in grab_cv2_contours(
             cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -210,35 +202,21 @@ class Cv2Mog2MotionDetector(MotionDetector):
         self._calibration_rate = m.calibration_learning_rate
         self._shadow_mode = m.shadow_mode
         self._use_bgr = m.use_bgr
-        self._contrast_enabled = m.contrast_norm
+        self._contrast_enabled = self.config.improve_contrast
         self._contrast_history = m.contrast_history
         self._contrast_min_pct = m.contrast_min_pct
         self._contrast_max_pct = m.contrast_max_pct
         self._persistence_frames = m.persistence_frames
         self._persistence_tolerance = m.persistence_match_tolerance
         self._morphology = m.morphology
-        self._contours = m.contours
+        self._max_area_ratio = m.max_area_ratio
         self._warmup_frames = m.warmup_frames
+        # the contour gate uses the shared motion settings, same as the stock detector
+        self._min_area = self.config.contour_area or 0
 
-        # MOG2 needs a higher processing height than the config default
+        # the shared motion frame height, unset means the full frame, same as the stock detector
         H, W = self.frame_shape
-        if m.frame_height is not None:
-            frame_height = m.frame_height
-            if (
-                frame_height < self._MIN_RECOMMENDED_FRAME_HEIGHT
-                and self._warned_low_height != frame_height
-            ):
-                logger.warning(
-                    "%s: mog2.frame_height %d is below the recommended %d; "
-                    "motion sensitivity and dappled suppression degrade at "
-                    "low processing resolutions",
-                    self.name,
-                    frame_height,
-                    self._DEFAULT_FRAME_HEIGHT,
-                )
-                self._warned_low_height = frame_height
-        else:
-            frame_height = min(self._DEFAULT_FRAME_HEIGHT, H)
+        frame_height = self.config.frame_height or H
         self._resize_factor = H / frame_height
         self._proc_size = (frame_height, round(frame_height * W / H))
         self._proc_pixels = self._proc_size[0] * self._proc_size[1]

@@ -264,7 +264,7 @@
     },
     "detector": {
       "label": "Motion detector",
-      "description": "Motion detector algorithm: improved is the stock detector (default) and mog2 is the OpenCV MOG2 background subtraction detector. Changing this requires a restart; the mog2 options are hot-reloadable. When using mog2, leave motion.frame_height unset (the detector defaults to its tuned 360 processing height; values below 200 degrade detection and log a warning)."
+      "description": "Motion detector algorithm: improved is the stock detector (default) and mog2 is the OpenCV MOG2 background subtraction detector. Changing this requires a restart; the mog2 options are hot-reloadable. Both detectors share the motion frame_height and contour_area settings."
     },
     "threshold": {
       "label": "Motion threshold",
@@ -309,10 +309,6 @@
     "mog2": {
       "label": "MOG2 options",
       "description": "Options for the MOG2 motion detector; only used when the detector is set to mog2.",
-      "frame_height": {
-        "label": "Processing frame height",
-        "description": "Height in pixels to scale frames to for MOG2 processing; unset uses 360 (tuned for MOG2). The stock motion frame_height (default 100) is too coarse for the mog2 detector and is not used by it."
-      },
       "history": {
         "label": "Background history",
         "description": "MOG2 background model history in frames; higher is more robust but uses more memory."
@@ -329,6 +325,10 @@
         "label": "Calibration learning rate",
         "description": "Background adaptation rate used while calibrating (startup, mask or option changes, lightning or skip triggers). Leave unset to let MOG2 choose its automatic adaptive rate."
       },
+      "max_area_ratio": {
+        "label": "Maximum contour area ratio",
+        "description": "Maximum motion contour area as a fraction of the motion frame; larger contours (for example a full-frame scene change) are ignored. Leave at 1.0 to keep every contour, which matches the stock detector."
+      },
       "shadow_mode": {
         "label": "Shadow mode",
         "description": "Whether MOG2 shadow pixels count as foreground (keep) or are treated as background (background)."
@@ -336,10 +336,6 @@
       "use_bgr": {
         "label": "Use BGR input",
         "description": "Convert the YUV420p (I420) frame to BGR and feed 3-channel color to MOG2 instead of the grayscale luma plane. Luma (default) is cheaper and cleaner on dappled shadows; BGR enables color-aware modeling but adds ~2x dappled false positives."
-      },
-      "contrast_norm": {
-        "label": "Contrast normalization",
-        "description": "Apply percentile contrast normalization before analysis to stabilize detection across lighting changes."
       },
       "contrast_history": {
         "label": "Contrast history",
@@ -377,21 +373,9 @@
           "description": "Number of open/close morphology iterations."
         }
       },
-      "contours": {
-        "label": "Contours",
-        "description": "Contour area gate options for MOG2 motion boxes.",
-        "min_area": {
-          "label": "Minimum contour area",
-          "description": "Minimum ROI area in pixels at the MOG2 processing resolution (tuned default 160 at the 360 processing height); unset (null) falls back to the contour area setting."
-        },
-        "max_area_ratio": {
-          "label": "Maximum contour area ratio",
-          "description": "Maximum ROI area as a fraction of the motion frame; larger contours (e.g. full-frame scene changes) are ignored."
-        }
-      },
       "warmup_frames": {
         "label": "Warmup frames",
-        "description": "Frames the MOG2 model learns the background before emitting boxes."
+        "description": "Frames the MOG2 model learns the background before emitting boxes; 0 emits boxes from the first frame, which matches the stock detector."
       }
     },
     "enabled_in_config": {

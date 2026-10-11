@@ -6,7 +6,6 @@ from ..base import FrigateBaseModel
 from .mask import MotionMaskConfig
 
 __all__ = [
-    "Mog2ContoursConfig",
     "Mog2MorphologyConfig",
     "Mog2MotionConfig",
     "MotionConfig",
@@ -26,36 +25,14 @@ class Mog2MorphologyConfig(FrigateBaseModel):
         ge=1,
     )
     iterations: int = Field(
-        default=3,
+        default=1,
         title="Morphology iterations",
         description="Number of open/close morphology iterations.",
         ge=0,
     )
 
 
-class Mog2ContoursConfig(FrigateBaseModel):
-    min_area: int | None = Field(
-        default=160,
-        title="Minimum contour area",
-        description="Minimum ROI area in pixels at the MOG2 processing resolution (tuned default 160 at the 360 processing height); unset (null) falls back to the contour area setting.",
-        ge=0,
-    )
-    max_area_ratio: float = Field(
-        default=0.9,
-        title="Maximum contour area ratio",
-        description="Maximum ROI area as a fraction of the motion frame; larger contours (e.g. full-frame scene changes) are ignored.",
-        ge=0.0,
-        le=1.0,
-    )
-
-
 class Mog2MotionConfig(FrigateBaseModel):
-    frame_height: int | None = Field(
-        default=None,
-        title="Processing frame height",
-        description="Height in pixels to scale frames to for MOG2 processing; unset uses 360 (tuned for MOG2). The stock motion frame_height (default 100) is too coarse for the mog2 detector and is not used by it.",
-        ge=1,
-    )
     history: int = Field(
         default=100,
         title="Background history",
@@ -82,6 +59,13 @@ class Mog2MotionConfig(FrigateBaseModel):
         ge=0.0,
         le=1.0,
     )
+    max_area_ratio: float = Field(
+        default=1.0,
+        title="Maximum contour area ratio",
+        description="Maximum motion contour area as a fraction of the motion frame; larger contours (for example a full-frame scene change) are ignored. Leave at 1.0 to keep every contour, which matches the stock detector.",
+        ge=0.0,
+        le=1.0,
+    )
     shadow_mode: Literal["keep", "background"] = Field(
         default="keep",
         title="Shadow mode",
@@ -96,11 +80,6 @@ class Mog2MotionConfig(FrigateBaseModel):
             "and cleaner on dappled shadows; BGR enables color-aware modeling "
             "but adds ~2x dappled false positives."
         ),
-    )
-    contrast_norm: bool = Field(
-        default=True,
-        title="Contrast normalization",
-        description="Apply percentile contrast normalization before analysis to stabilize detection across lighting changes.",
     )
     contrast_history: int = Field(
         default=50,
@@ -123,7 +102,7 @@ class Mog2MotionConfig(FrigateBaseModel):
         le=100.0,
     )
     persistence_frames: int = Field(
-        default=2,
+        default=0,
         title="Persistence frames",
         description="Minimum consecutive frames a region must persist before a motion box is emitted; 0 disables the temporal gate.",
         ge=0,
@@ -139,15 +118,10 @@ class Mog2MotionConfig(FrigateBaseModel):
         title="Morphology",
         description="Morphology options applied to the MOG2 foreground mask.",
     )
-    contours: Mog2ContoursConfig = Field(
-        default_factory=Mog2ContoursConfig,
-        title="Contours",
-        description="Contour area gate options for MOG2 motion boxes.",
-    )
     warmup_frames: int = Field(
-        default=30,
+        default=0,
         title="Warmup frames",
-        description="Frames the MOG2 model learns the background before emitting boxes.",
+        description="Frames the MOG2 model learns the background before emitting boxes; 0 emits boxes from the first frame, which matches the stock detector.",
         ge=0,
     )
 
@@ -161,7 +135,7 @@ class MotionConfig(FrigateBaseModel):
     detector: Literal["improved", "mog2"] = Field(
         default="improved",
         title="Motion detector",
-        description="Motion detector algorithm: improved is the stock detector (default) and mog2 is the OpenCV MOG2 background subtraction detector. Changing this requires a restart; the mog2 options are hot-reloadable. When using mog2, leave motion.frame_height unset (the detector defaults to its tuned 360 processing height; values below 200 degrade detection and log a warning).",
+        description="Motion detector algorithm: improved is the stock detector (default) and mog2 is the OpenCV MOG2 background subtraction detector. Changing this requires a restart; the mog2 options are hot-reloadable. Both detectors share the motion frame_height and contour_area settings.",
     )
     threshold: int = Field(
         default=30,

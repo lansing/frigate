@@ -50,27 +50,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--persistence",
         type=int,
-        default=2,
+        default=0,
         help="mog2 persistence_frames; 0 disables the gate (ignored for improved)",
     )
     parser.add_argument(
         "--contrast",
         choices=["on", "off"],
         default="on",
-        help="contrast normalization: mog2.contrast_norm / improve_contrast",
+        help="contrast normalization: motion.improve_contrast, shared by both detectors",
     )
     parser.add_argument(
         "--height",
         type=int,
         default=0,
-        help="processing frame height; 0 = detector default "
-        "(360 for mog2, 100 for improved)",
+        help="motion.frame_height; 0 = config default (100)",
     )
     parser.add_argument(
         "--min-area",
         type=int,
         default=0,
-        help="override mog2.contours.min_area (0 = detector default)",
+        help="override motion.contour_area, shared by both detectors (0 = config default)",
     )
     parser.add_argument(
         "--morph",
@@ -81,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--morph-iterations",
         type=int,
-        default=3,
+        default=1,
         help="morphology iterations (3x3 kernel, default 3)",
     )
     parser.add_argument(
@@ -111,21 +110,21 @@ def eval_clip(path: str, args: argparse.Namespace) -> dict:
         "rasterized_mask",
         np.full(frame_shape, 255, dtype=np.uint8),
     )
+    # shared motion settings, both detectors read them
+    config.improve_contrast = contrast_on
+    if args.height:
+        config.frame_height = args.height
+    if args.min_area:
+        config.contour_area = args.min_area
+
     if args.detector == "mog2":
         config.mog2.persistence_frames = args.persistence
-        config.mog2.contrast_norm = contrast_on
-        if args.height:
-            config.mog2.frame_height = args.height
-        if args.min_area:
-            config.mog2.contours.min_area = args.min_area
         if args.morph == "off":
             config.mog2.morphology.enabled = False
         else:
             config.mog2.morphology.iterations = args.morph_iterations
         detector = Cv2Mog2MotionDetector(frame_shape, config, fps, name="eval")
     else:
-        config.improve_contrast = contrast_on
-        config.frame_height = args.height or 100
         detector = ImprovedMotionDetector(frame_shape, config, fps, name="eval")
 
     total = 0

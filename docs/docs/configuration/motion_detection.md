@@ -19,6 +19,31 @@ The default motion settings should work well for the majority of cameras, howeve
 
 Before tuning motion it is important to understand the goal. In an optimal configuration, motion from people and cars would be detected, but not grass moving, lighting changes, timestamps, etc. If your motion detection is too sensitive, you will experience higher CPU loads and greater false positives from the increased rate of object detection. If it is not sensitive enough, you will miss objects that you want to track.
 
+## Motion Detector
+
+Frigate ships two motion detectors. `improved` is the stock one and the default. `mog2` is OpenCV's MOG2 background subtraction, which keeps a running model of the background instead of comparing two frames. Switching to it is one line and needs a restart:
+
+```yaml
+motion:
+  detector: mog2
+```
+
+Both detectors share `frame_height`, `contour_area`, `improve_contrast`, `lightning_threshold`, `skip_motion_threshold`, and motion masks, so tuning on those values carries over when you switch. The mog2 detector does not use `threshold`, `delta_alpha`, or `frame_alpha`. `threshold` is the stock detector's pixel difference value, and the equivalent sensitivity knob on mog2 is `mog2.var_threshold`. This means the Motion Tuner's threshold slider has no effect on a mog2 camera, tune `var_threshold` in the config instead.
+
+The mog2 only options are documented in the [full reference config](/configuration/advanced/reference.md) under `motion.mog2`. Their defaults match the stock detector, so a plain switch to `detector: mog2` needs no retuning:
+
+| Field | Description |
+| ----- | ----------- |
+| **var_threshold** | Sensitivity for mog2. Higher flags fewer pixels as foreground. (default: 24) |
+| **history** | Frames the background model keeps. Higher is more robust, uses more memory. (default: 100) |
+| **learning_rate** and **calibration_learning_rate** | Background adaptation rate. Leave unset to let MOG2 pick its automatic rate. |
+| **shadow_mode** | Whether MOG2 shadow pixels count as motion: `keep` or `background`. `keep` is more sensitive. (default: keep) |
+| **use_bgr** | Feed 3-channel color instead of the grayscale luma plane. Luma is cheaper and cleaner on dappled shadows. (default: false) |
+| **morphology** | Open and close passes over the motion mask that remove speckle. One pass at a 3x3 kernel is the default and rarely needs changing. (default: enabled, kernel 3, iterations 1) |
+| **persistence_frames** | Consecutive frames a region must persist before it counts as motion. 0 disables the gate. (default: 0) |
+| **warmup_frames** | Frames MOG2 learns before emitting motion boxes. 0 emits from the first frame. (default: 0) |
+| **max_area_ratio** | Drops contours larger than this fraction of the frame. 1.0 keeps every contour. (default: 1.0) |
+
 ## Create Motion Masks
 
 First, mask areas with regular motion not caused by the objects you want to detect. The best way to find candidates for motion masks is by watching the debug stream with motion boxes enabled. Good use cases for motion masks are timestamps or tree limbs and large bushes that regularly move due to wind. When possible, avoid creating motion masks that would block motion detection for objects you want to track **even if they are in locations where you don't want alerts or detections**. Motion masks should not be used to avoid detecting objects in specific areas. More details can be found [in the masks docs.](/configuration/masks.md).

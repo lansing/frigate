@@ -527,6 +527,41 @@ motion:
   # Higher values will result in more granular motion detection at the expense of higher CPU usage.
   # Lower values result in less CPU, but small changes may not register as motion.
   frame_height: 100
+  # Optional: Motion detector. improved is the stock detector, mog2 is OpenCV MOG2 background subtraction.
+  # Changing this requires a restart. Both detectors share frame_height, contour_area, and improve_contrast.
+  detector: improved
+  # Optional: MOG2 options, only used when detector is mog2 and hot-reloadable (defaults shown below)
+  mog2:
+    # Optional: MOG2 background model history in frames; higher is more robust but uses more memory
+    history: 100
+    # Optional: MOG2 variance threshold; higher values flag fewer pixels as foreground (less sensitive)
+    var_threshold: 24
+    # Optional: Per-frame background adaptation rate in steady state (0 to 1). Leave unset for MOG2's automatic rate.
+    learning_rate: None
+    # Optional: Background adaptation rate used while calibrating. Leave unset for MOG2's automatic rate.
+    calibration_learning_rate: None
+    # Optional: Whether MOG2 shadow pixels count as foreground: keep or background
+    shadow_mode: keep
+    # Optional: Feed 3-channel BGR color to MOG2 instead of the grayscale luma plane
+    use_bgr: false
+    # Optional: Moving window length in frames for the contrast baseline
+    contrast_history: 50
+    # Optional: Lower and upper percentile bounds for contrast normalization
+    contrast_min_pct: 4.0
+    contrast_max_pct: 96.0
+    # Optional: Maximum motion contour area as a fraction of the motion frame; 1.0 keeps every contour
+    max_area_ratio: 1.0
+    # Optional: Minimum consecutive frames a region must persist before a motion box is emitted; 0 disables the gate
+    persistence_frames: 0
+    # Optional: Center distance match factor used to track a region across frames for the persistence gate
+    persistence_match_tolerance: 0.5
+    # Optional: Morphology applied to the MOG2 foreground mask to scrub speckle
+    morphology:
+      enabled: true
+      kernel_size: 3
+      iterations: 1
+    # Optional: Frames MOG2 learns the background before emitting boxes; 0 emits boxes from the first frame
+    warmup_frames: 0
   # Optional: motion mask
   # NOTE: see docs for more detailed info on creating masks
   mask:
